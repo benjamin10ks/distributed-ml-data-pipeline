@@ -1,6 +1,8 @@
 # Distributed ML Data Pipeline
 
-A distributed, production-grade ML data pipeline covering ingestion, streaming, feature engineering, storage, and model serving. Built as a summer learning project touching systems design, distributed computing, data engineering, and ML infrastructure.
+A distributed, production-grade ML data pipeline covering ingestion, streaming, feature engineering, storage, and model serving. Built as a summer learning project in **Go**, touching systems design, distributed computing, data engineering, and ML infrastructure.
+
+> **Language note**: The pipeline services (ingestion workers, Kafka consumers/producers, inference API, orchestration) are written in Go. External infrastructure that runs as its own process — Debezium, MLflow, Feast — is language-agnostic and communicates over HTTP/gRPC. The distributed compute layer uses Go-native workers rather than Spark/Ray. See [Go-specific considerations](#go-specific-considerations) below.
 
 ---
 
@@ -45,13 +47,15 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Get the skeleton standing. Nothing works end-to-end yet, but the core services are running locally.
 
+- [ ] Initialize Go workspace: `go work init`, one `go.mod` per service under each top-level directory
 - [ ] Set up monorepo structure (`ingestion/`, `streaming/`, `processing/`, `storage/`, `serving/`, `infra/`)
 - [ ] Write `docker-compose.yml` with Kafka, Zookeeper, Postgres, and MinIO (local S3)
 - [ ] Configure Kafka topics with appropriate partition counts and retention settings
 - [ ] Stand up Confluent Schema Registry (or use the Redpanda bundled one)
-- [ ] Write a `Makefile` with `up`, `down`, `logs`, `reset` targets
+- [ ] Write a `Makefile` with `up`, `down`, `logs`, `reset`, and `build` targets (`go build ./...`)
 - [ ] Add `.env.example` with all required environment variables documented
-- [ ] Set up a shared `config/` module that all services read from
+- [ ] Set up a shared `internal/config/` package using `os.Getenv` + a typed config struct
+- [ ] Set up structured logging with `slog` (stdlib since Go 1.21) — JSON output, `trace_id` field from context
 
 ---
 
@@ -62,14 +66,14 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Create landing zone bucket structure: `source={name}/date={YYYY-MM-DD}/`
 - [ ] Implement **file manifest** table in Postgres (columns: `path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
 - [ ] Wire S3/MinIO event notifications → SQS-compatible queue on file upload
-- [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check)
-- [ ] Implement validation checks: file size bounds, format sniffing, checksum verification
-- [ ] Build CSV parser with chunking (target 128MB chunks, handle quoted fields)
-- [ ] Build Parquet parser (read row groups independently for parallelism)
-- [ ] Add NDJSON support (reject standard JSON arrays, enforce newline-delimited)
+- [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check) — use `aws-sdk-go-v2` for S3/SQS
+- [ ] Implement validation checks: file size bounds, format sniffing, checksum verification (`crypto/sha256` stdlib)
+- [ ] Build CSV parser with chunking (target 128MB chunks) — use `encoding/csv` stdlib, handle quoted fields
+- [ ] Build Parquet parser (read row groups independently for parallelism) — use `github.com/parquet-go/parquet-go`
+- [ ] Add NDJSON support using `encoding/json` with a streaming decoder (`json.NewDecoder` + loop)
 - [ ] Write parsed output to processed storage as Snappy-compressed Parquet, 128–256MB files
 - [ ] Implement quarantine bucket + alerting for validation failures
-- [ ] Update manifest status on success / failure / quarantine
+- [ ] Update manifest status on success / failure / quarantine — use `pgx/v5` for Postgres
 - [ ] Write integration test: upload a file, assert it appears in processed storage with correct hash
 
 ---
@@ -96,11 +100,13 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Harden the event bus: producers, consumers, schema enforcement, and observability.
 
+- [ ] Choose Go Kafka client: `github.com/twmb/franz-go` (recommended, full-featured) or `confluent-kafka-go` (CGO, closer to librdkafka)
 - [ ] Define topic partitioning strategy per source (CDC: by PK, files: by source name)
 - [ ] Set retention policies per topic (raw events: 7 days, processed: 30 days)
 - [ ] Implement a generic Kafka producer with retry logic and idempotent writes enabled
 - [ ] Implement a generic Kafka consumer with manual offset commits (no auto-commit)
-- [ ] Add consumer group lag monitoring (expose as Prometheus metrics)
+- [ ] Use goroutines for concurrent partition consumption — one goroutine per partition is idiomatic
+- [ ] Add consumer group lag monitoring (expose as Prometheus metrics via `prometheus/client_golang`)
 - [ ] Test at-least-once delivery: kill a consumer mid-batch, verify no events are lost on restart
 - [ ] Test exactly-once processing: verify idempotent writes don't produce duplicates
 - [ ] Add schema evolution test: add a nullable column, verify existing consumers don't break
@@ -111,31 +117,33 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Build the transformation layer that turns raw events into ML-ready features.
 
-- [ ] Define a `Feature` interface / base class with `name`, `dtype`, `transform()`, `inverse_transform()`
-- [ ] Implement numerical features: normalization, standardization, bucketization
+- [ ] Define a `Feature` interface with `Name() string`, `Transform(v any) (any, error)`, `InverseTransform(v any) (any, error)`
+- [ ] Implement numerical features: normalization, standardization, bucketization (pure Go, no external deps)
 - [ ] Implement categorical features: one-hot encoding, target encoding, frequency encoding
 - [ ] Implement temporal features: hour-of-day, day-of-week, days-since-event, rolling windows
-- [ ] Implement text features: tokenization, TF-IDF, embedding lookup
-- [ ] Build a `FeaturePipeline` that chains transforms and is serializable (pickle / ONNX)
+- [ ] Implement text features: tokenization, TF-IDF (Go-native); for embeddings, call an external model server over gRPC
+- [ ] Build a `FeaturePipeline` struct that chains transforms — serialize pipeline config to JSON for reproducibility
 - [ ] **Critical**: verify training-time and serving-time transforms produce identical output for the same input (training-serving skew test)
 - [ ] Add data type validation at pipeline boundaries (reject unexpected nulls, out-of-range values)
-- [ ] Write a backfill job that recomputes features over historical data using Spark or Ray
+- [ ] Write a backfill job that recomputes features over historical Parquet files using a worker pool (use `errgroup` from `golang.org/x/sync`)
 - [ ] Benchmark transform throughput (target: process 1M rows/minute on a single node)
 
 ---
 
 ### Phase 6 — Distributed Compute
 
-> Scale processing beyond a single node using a distributed compute framework.
+> Scale processing beyond a single node using Go-native worker pools and Kafka partitioning.
 
-- [ ] Choose framework: **Spark** (batch-first, mature) or **Ray** (Python-native, good for ML)
-- [ ] Set up local cluster (Spark standalone or Ray local mode for dev)
-- [ ] Port the CSV chunking parser to run as a Spark job (`spark.read.csv` with schema)
-- [ ] Port feature engineering pipeline to run as a Spark DataFrame transform
-- [ ] Implement data partitioning strategy for compute jobs (partition by date, repartition before shuffle-heavy ops)
-- [ ] Add job checkpointing so failed jobs can resume from last good partition
-- [ ] Write a job that joins CDC events with file-ingested data (tests distributed join correctness)
-- [ ] Profile and eliminate data skew (check partition size distribution after any `groupBy`)
+> **Go note**: Rather than Spark or Ray (JVM/Python ecosystems), Go-native distribution uses Kafka partitions as the work distribution mechanism — each worker consumes one or more partitions concurrently. This is a cleaner mental model and performs well for moderate data volumes (< 10TB/day).
+
+- [ ] Implement a `WorkerPool` using goroutines + a buffered channel as the job queue — configurable concurrency via `WORKER_COUNT` env var
+- [ ] Use `errgroup` (`golang.org/x/sync/errgroup`) for fan-out with coordinated error propagation
+- [ ] Port the CSV chunking parser to fan out chunks across the worker pool — track chunk offsets for resumability
+- [ ] Port feature engineering pipeline to process Parquet row groups in parallel (one goroutine per row group)
+- [ ] Implement data partitioning by date: each worker claims a date partition via a Postgres advisory lock (prevents double-processing)
+- [ ] Add job checkpointing: write progress to Postgres after each chunk so failed jobs resume from last good offset
+- [ ] Write a job that joins CDC events with file-ingested data — use an in-memory hash join for datasets that fit in RAM, spill to disk via temp Parquet files for larger sets
+- [ ] Profile with `go tool pprof` — identify CPU vs I/O bottlenecks; check goroutine count isn't unbounded
 
 ---
 
@@ -170,13 +178,15 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Stand up inference endpoints and batch prediction jobs.
 
-- [ ] Build a FastAPI inference service that loads a model from the registry at startup
-- [ ] Add a `/predict` endpoint: fetches features from feature store, runs inference, returns result
-- [ ] Add a `/health` endpoint that checks model loaded, feature store reachable, and model version
-- [ ] Containerize the service: write `Dockerfile`, verify cold-start time < 5s
-- [ ] Implement a batch prediction job: reads from lakehouse, writes predictions back to a results table
-- [ ] Load test the inference endpoint (target: 100 req/s at < 50ms p99 latency on a single container)
-- [ ] Add a canary deployment pattern: route 5% of traffic to a new model version, compare metrics
+- [ ] Build inference service using Go's `net/http` stdlib (or `github.com/go-chi/chi` for routing)
+- [ ] Add a `POST /predict` endpoint: fetches features from feature store (Redis via `go-redis/v9`), runs inference, returns result
+- [ ] For model execution: load an ONNX model using `github.com/onnxruntime-go` — avoids a Python sidecar for most model types
+- [ ] Alternatively: call a Python model server (TF Serving, Triton) over gRPC from Go — idiomatic for large neural nets
+- [ ] Add a `GET /health` endpoint that checks model loaded, Redis reachable, and current model version
+- [ ] Containerize the service: write `Dockerfile` using a distroless or scratch base image — Go binaries produce small, fast images
+- [ ] Implement a batch prediction job: reads Parquet from lakehouse, fans out predictions across worker pool, writes results back
+- [ ] Load test the inference endpoint using `hey` or `k6` (target: 100 req/s at < 50ms p99 latency on a single container)
+- [ ] Add a canary deployment pattern: route 5% of traffic to a new model version via a weighted round-robin in the handler
 
 ---
 
@@ -184,13 +194,13 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Wire the pipeline together with a scheduler that handles retries, dependencies, and backfills.
 
-- [ ] Choose orchestrator: **Airflow** (mature, large ecosystem) or **Prefect** (simpler Python API)
-- [ ] Define a DAG / Flow for the nightly file ingestion run
-- [ ] Define a DAG for feature materialization (depends on ingestion DAG completing)
-- [ ] Define a DAG for model retraining (depends on feature materialization)
+- [ ] Choose orchestrator: **Temporal** (Go-native, strongly typed workflows — best fit for a Go project) or **Airflow** (Python-based but widely used, interact via REST API from Go)
+- [ ] Define a Workflow for the nightly file ingestion run (Temporal: a Go function decorated with `workflow.ExecuteActivity`)
+- [ ] Define a Workflow for feature materialization (depends on ingestion workflow completing — use `workflow.GetVersion` for safe rollout)
+- [ ] Define a Workflow for model retraining trigger (signals the Python training job, waits for completion signal)
 - [ ] Implement retry policy: 3 retries with exponential backoff, alert on final failure
-- [ ] Implement backfill: re-run the ingestion DAG for a specific date range
-- [ ] Add SLA monitoring: alert if a DAG hasn't completed by a deadline time
+- [ ] Implement backfill: re-run the ingestion workflow for a specific date range using a `for` loop over dates in a parent workflow
+- [ ] Add SLA monitoring: use Temporal's workflow timeout + a heartbeat activity to detect stalled runs
 
 ---
 
@@ -213,11 +223,67 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 As you build, record why you made each of these choices in an `ADR/` (Architecture Decision Records) folder:
 
 - [ ] **Message format**: Avro vs Protobuf vs JSON — and why
-- [ ] **Compute framework**: Spark vs Ray vs Dask — and why
-- [ ] **Feature store**: Feast vs Tecton vs custom — and why
-- [ ] **Orchestrator**: Airflow vs Prefect vs Dagster — and why
+- [ ] **Compute approach**: Kafka-partition-based workers vs external Spark cluster — and why
+- [ ] **Feature store**: Feast vs Tecton vs custom Redis-backed store — and why
+- [ ] **Orchestrator**: Temporal vs Airflow — and why
+- [ ] **Inference runtime**: ONNX Runtime in-process vs external model server (TF Serving/Triton) — and why
 - [ ] **Exactly-once semantics**: how you achieve it (or why you settled for at-least-once + idempotency)
 - [ ] **Training-serving skew**: how your architecture prevents it
+
+---
+
+## Go-Specific Considerations
+
+### Key libraries
+
+| Concern | Library |
+|---|---|
+| Kafka producer/consumer | `github.com/twmb/franz-go` |
+| Postgres | `github.com/jackc/pgx/v5` |
+| S3 / SQS | `github.com/aws/aws-sdk-go-v2` |
+| Parquet | `github.com/parquet-go/parquet-go` |
+| Redis (feature store) | `github.com/redis/go-redis/v9` |
+| Prometheus metrics | `github.com/prometheus/client_golang` |
+| HTTP routing | `github.com/go-chi/chi/v5` |
+| ONNX inference | `github.com/yalue/onnxruntime_go` |
+| Concurrency | `golang.org/x/sync/errgroup` |
+| Workflow orchestration | `go.temporal.io/sdk` |
+
+### Where Go fits naturally
+
+The ingestion workers, Kafka consumers, the inference API, and the orchestration layer are all excellent Go. Goroutines make concurrent file processing and multi-partition Kafka consumption clean and explicit. The compiled binary + distroless Docker image story is far simpler than Python for deployment.
+
+### Where to plan carefully
+
+For **model training**, Go has no scikit-learn or PyTorch equivalent. The practical pattern is to keep training in Python and use Go only for the pipeline that feeds training data and serves trained models. Your Go inference service loads an ONNX-exported model — a format that most Python training frameworks (scikit-learn via `skl2onnx`, PyTorch, TensorFlow) can export to.
+
+For **the feature store**, Feast is Python-native. Options: run Feast's materialization jobs as a Docker sidecar and interact with the online store (Redis) directly from Go, or implement a lightweight custom feature store backed by Redis yourself — a reasonable choice for a learning project.
+
+### Concurrency patterns you'll use repeatedly
+
+```go
+// Fan-out: process N files concurrently, collect errors
+g, ctx := errgroup.WithContext(ctx)
+for _, file := range files {
+    file := file // capture loop variable
+    g.Go(func() error {
+        return processFile(ctx, file)
+    })
+}
+if err := g.Wait(); err != nil {
+    return err
+}
+
+// Worker pool: bounded concurrency via buffered channel
+jobs := make(chan File, 100)
+for i := 0; i < workerCount; i++ {
+    go func() {
+        for f := range jobs {
+            processFile(ctx, f)
+        }
+    }()
+}
+```
 
 ---
 
@@ -240,6 +306,9 @@ As you build, record why you made each of these choices in an `ADR/` (Architectu
 # Start all infrastructure
 make up
 
+# Build all Go services
+go build ./...
+
 # Verify Kafka is healthy
 docker exec -it kafka kafka-topics.sh --list --bootstrap-server localhost:9092
 
@@ -252,6 +321,12 @@ aws s3 cp tests/fixtures/sample.csv s3://landing/source=test/date=2026-05-17/ \
 
 # Watch the file manifest
 psql -U postgres -c "SELECT path, status, content_hash FROM file_manifest ORDER BY created_at DESC LIMIT 10;"
+
+# Run all tests
+go test ./... -race -timeout 120s
+
+# Profile the ingestion worker
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 ```
 
 ---
@@ -261,22 +336,30 @@ psql -U postgres -c "SELECT path, status, content_hash FROM file_manifest ORDER 
 ```
 .
 ├── ingestion/
-│   ├── file/           # File-based ingestion workers
-│   └── cdc/            # Debezium config and CDC consumers
+│   ├── file/           # File-based ingestion worker (Go)
+│   │   ├── cmd/main.go
+│   │   ├── detector.go
+│   │   ├── manifest.go
+│   │   ├── parser/
+│   │   │   ├── csv.go
+│   │   │   ├── parquet.go
+│   │   │   └── ndjson.go
+│   │   └── validator.go
+│   └── cdc/            # Debezium config + CDC event consumer (Go)
 ├── streaming/
-│   └── kafka/          # Producer/consumer base classes, topic configs
+│   └── kafka/          # Producer/consumer base types, topic configs (Go)
 ├── processing/
-│   ├── features/       # Feature definitions and transform pipelines
-│   └── compute/        # Spark / Ray jobs
+│   ├── features/       # Feature interface + transform implementations (Go)
+│   └── compute/        # Worker pool jobs (Go)
 ├── storage/
-│   ├── lakehouse/      # Delta Lake table definitions and compaction jobs
-│   ├── feature_store/  # Feast feature views and materialization jobs
-│   └── registry/       # MLflow experiment and model management
+│   ├── lakehouse/      # Parquet/Delta write helpers (Go)
+│   ├── feature_store/  # Redis online store client (Go) + Feast config (Python)
+│   └── registry/       # MLflow REST client (Go)
 ├── serving/
-│   ├── inference/      # FastAPI inference service
-│   └── batch/          # Batch prediction jobs
+│   ├── inference/      # net/http inference service + ONNX loader (Go)
+│   └── batch/          # Batch prediction worker pool (Go)
 ├── orchestration/
-│   └── dags/           # Airflow DAGs or Prefect flows
+│   └── workflows/      # Temporal workflow and activity definitions (Go)
 ├── monitoring/
 │   ├── dashboards/     # Grafana dashboard JSON exports
 │   └── alerts/         # Prometheus alerting rules
@@ -284,8 +367,8 @@ psql -U postgres -c "SELECT path, status, content_hash FROM file_manifest ORDER 
 │   ├── docker-compose.yml
 │   └── Makefile
 ├── tests/
-│   ├── fixtures/       # Sample files for integration tests
-│   └── integration/    # End-to-end pipeline tests
+│   ├── fixtures/       # Sample CSV, Parquet, NDJSON files
+│   └── integration/    # End-to-end pipeline tests (Go)
 ├── ADR/                # Architecture Decision Records
 └── README.md
 ```
@@ -294,9 +377,23 @@ psql -U postgres -c "SELECT path, status, content_hash FROM file_manifest ORDER 
 
 ## Resources
 
+**Go-specific**
+- [franz-go Kafka client examples](https://github.com/twmb/franz-go/tree/master/examples)
+- [pgx Postgres driver docs](https://pkg.go.dev/github.com/jackc/pgx/v5)
+- [Temporal Go SDK quickstart](https://docs.temporal.io/develop/go)
+- [ONNX Runtime Go bindings](https://github.com/yalue/onnxruntime_go)
+- [Go pprof profiling guide](https://pkg.go.dev/net/http/pprof)
+
+**Distributed systems fundamentals**
+- [Designing Data-Intensive Applications — Kleppmann](https://dataintensive.net/) ← read this first if you haven't
+- [Kafka: The Definitive Guide (free PDF)](https://www.confluent.io/resources/kafka-the-definitive-guide/)
 - [Debezium Postgres Connector Docs](https://debezium.io/documentation/reference/connectors/postgresql.html)
+
+**Storage**
 - [Delta Lake Getting Started](https://docs.delta.io/latest/quick-start.html)
+- [Apache Iceberg spec](https://iceberg.apache.org/spec/)
+
+**ML infrastructure**
 - [Feast Feature Store Docs](https://docs.feast.dev/)
 - [MLflow Tracking Guide](https://mlflow.org/docs/latest/tracking.html)
-- [Kafka: The Definitive Guide (free PDF)](https://www.confluent.io/resources/kafka-the-definitive-guide/)
-- [Designing Data-Intensive Applications — Kleppmann](https://dataintensive.net/) ← read this first if you haven't
+- [ONNX model export guides](https://onnx.ai/sklearn-onnx/)
