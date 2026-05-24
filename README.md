@@ -65,7 +65,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 - [ ] Create landing zone bucket structure: `source={name}/date={YYYY-MM-DD}/`
 - [ ] Implement **file manifest** table in Postgres (columns: `path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
-- [ ] Wire S3/MinIO event notifications → SQS-compatible queue on file upload
+- [x] Wire S3/MinIO event notifications → SQS-compatible queue on file upload
 - [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check) — use `aws-sdk-go-v2` for S3/SQS
 - [ ] Implement validation checks: file size bounds, format sniffing, checksum verification (`crypto/sha256` stdlib)
 - [ ] Build CSV parser with chunking (target 128MB chunks) — use `encoding/csv` stdlib, handle quoted fields
@@ -247,7 +247,6 @@ As you build, record why you made each of these choices in an `ADR/` (Architectu
 | Parquet                 | `github.com/parquet-go/parquet-go`    |
 | Redis (feature store)   | `github.com/redis/go-redis/v9`        |
 | Prometheus metrics      | `github.com/prometheus/client_golang` |
-| HTTP routing            | `github.com/go-chi/chi/v5`            |
 | ONNX inference          | `github.com/yalue/onnxruntime_go`     |
 | Concurrency             | `golang.org/x/sync/errgroup`          |
 | Workflow orchestration  | `go.temporal.io/sdk`                  |
@@ -306,6 +305,9 @@ for i := 0; i < workerCount; i++ {
 ## Local Dev Setup
 
 ```bash
+# Initialize MinIO buckets
+make init
+
 # Start all infrastructure
 make up
 
