@@ -1,10 +1,14 @@
 package file
 
-import "net/http"
+import (
+	"log/slog"
+	"net/http"
+)
 
 type httpAdapter struct {
 	addr   string
 	events chan RawEvent
+	logger *slog.Logger
 }
 
 func NewHTTPAdapter(addr string) *httpAdapter {
