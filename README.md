@@ -47,15 +47,15 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Get the skeleton standing. Nothing works end-to-end yet, but the core services are running locally.
 
-- [ ] Initialize Go workspace: `go work init`, one `go.mod` per service under each top-level directory
-- [ ] Set up monorepo structure (`ingestion/`, `streaming/`, `processing/`, `storage/`, `serving/`, `infra/`)
-- [ ] Write `docker-compose.yml` with Kafka, Zookeeper, Postgres, and MinIO (local S3)
-- [ ] Configure Kafka topics with appropriate partition counts and retention settings
-- [ ] Stand up Confluent Schema Registry (or use the Redpanda bundled one)
-- [ ] Write a `Makefile` with `up`, `down`, `logs`, `reset`, and `build` targets (`go build ./...`)
-- [ ] Add `.env.example` with all required environment variables documented
-- [ ] Set up a shared `internal/config/` package using `os.Getenv` + a typed config struct
-- [ ] Set up structured logging with `slog` (stdlib since Go 1.21) — JSON output, `trace_id` field from context
+- [x] Initialize Go workspace: `go work init`, one `go.mod` per service under each top-level directory
+- [x] Set up monorepo structure (`ingestion/`, `streaming/`, `processing/`, `storage/`, `serving/`, `infra/`)
+- [x] Write `docker-compose.yml` with Kafka, Zookeeper, Postgres, and MinIO (local S3)
+- [x] Configure Kafka topics with appropriate partition counts and retention settings
+- [x] Stand up Confluent Schema Registry (or use the Redpanda bundled one)
+- [x] Write a `Makefile` with `up`, `down`, `logs`, `reset`, and `build` targets (`go build ./...`)
+- [x] Add `.env.example` with all required environment variables documented
+- [x] Set up a shared `internal/config/` package using `os.Getenv` + a typed config struct
+- [x] Set up structured logging with `slog` (stdlib since Go 1.21) — JSON output, `trace_id` field from context
 
 ---
 
@@ -152,6 +152,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 > Build the three storage tiers: data lakehouse, feature store, and model registry.
 
 **Data Lakehouse**
+
 - [ ] Set up Delta Lake (or Apache Iceberg) on MinIO
 - [ ] Implement schema-on-write with enforced column types
 - [ ] Enable time-travel: verify you can query the table as of a past timestamp
@@ -160,6 +161,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Add data retention policy (raw: 90 days, processed: 1 year)
 
 **Feature Store**
+
 - [ ] Set up Feast with a local Redis online store and Parquet offline store
 - [ ] Define `FeatureView` for each feature group, with `Entity` and `ttl`
 - [ ] Write a materialization job that pushes offline features to online store
@@ -167,6 +169,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Benchmark online feature retrieval latency (target: < 10ms p99)
 
 **Model Registry**
+
 - [ ] Set up MLflow tracking server (backed by Postgres for metadata, MinIO for artifacts)
 - [ ] Log a dummy model run: params, metrics, and a serialized model artifact
 - [ ] Implement model versioning: promote a model from `Staging` to `Production`
@@ -236,18 +239,18 @@ As you build, record why you made each of these choices in an `ADR/` (Architectu
 
 ### Key libraries
 
-| Concern | Library |
-|---|---|
-| Kafka producer/consumer | `github.com/twmb/franz-go` |
-| Postgres | `github.com/jackc/pgx/v5` |
-| S3 / SQS | `github.com/aws/aws-sdk-go-v2` |
-| Parquet | `github.com/parquet-go/parquet-go` |
-| Redis (feature store) | `github.com/redis/go-redis/v9` |
-| Prometheus metrics | `github.com/prometheus/client_golang` |
-| HTTP routing | `github.com/go-chi/chi/v5` |
-| ONNX inference | `github.com/yalue/onnxruntime_go` |
-| Concurrency | `golang.org/x/sync/errgroup` |
-| Workflow orchestration | `go.temporal.io/sdk` |
+| Concern                 | Library                               |
+| ----------------------- | ------------------------------------- |
+| Kafka producer/consumer | `github.com/twmb/franz-go`            |
+| Postgres                | `github.com/jackc/pgx/v5`             |
+| S3 / SQS                | `github.com/aws/aws-sdk-go-v2`        |
+| Parquet                 | `github.com/parquet-go/parquet-go`    |
+| Redis (feature store)   | `github.com/redis/go-redis/v9`        |
+| Prometheus metrics      | `github.com/prometheus/client_golang` |
+| HTTP routing            | `github.com/go-chi/chi/v5`            |
+| ONNX inference          | `github.com/yalue/onnxruntime_go`     |
+| Concurrency             | `golang.org/x/sync/errgroup`          |
+| Workflow orchestration  | `go.temporal.io/sdk`                  |
 
 ### Where Go fits naturally
 
@@ -289,14 +292,14 @@ for i := 0; i < workerCount; i++ {
 
 ## Non-Functional Requirements
 
-| Concern | Target |
-|---|---|
-| File processing latency | < 5 min from landing to processed storage |
-| CDC event latency | < 1 second end-to-end |
-| Online feature retrieval | < 10ms p99 |
-| Inference endpoint | < 50ms p99 at 100 req/s |
-| Pipeline availability | Zero data loss on any single component failure |
-| Backfill speed | Re-process 30 days of data in < 2 hours |
+| Concern                  | Target                                         |
+| ------------------------ | ---------------------------------------------- |
+| File processing latency  | < 5 min from landing to processed storage      |
+| CDC event latency        | < 1 second end-to-end                          |
+| Online feature retrieval | < 10ms p99                                     |
+| Inference endpoint       | < 50ms p99 at 100 req/s                        |
+| Pipeline availability    | Zero data loss on any single component failure |
+| Backfill speed           | Re-process 30 days of data in < 2 hours        |
 
 ---
 
@@ -378,6 +381,7 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 ## Resources
 
 **Go-specific**
+
 - [franz-go Kafka client examples](https://github.com/twmb/franz-go/tree/master/examples)
 - [pgx Postgres driver docs](https://pkg.go.dev/github.com/jackc/pgx/v5)
 - [Temporal Go SDK quickstart](https://docs.temporal.io/develop/go)
@@ -385,15 +389,18 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 - [Go pprof profiling guide](https://pkg.go.dev/net/http/pprof)
 
 **Distributed systems fundamentals**
+
 - [Designing Data-Intensive Applications — Kleppmann](https://dataintensive.net/) ← read this first if you haven't
 - [Kafka: The Definitive Guide (free PDF)](https://www.confluent.io/resources/kafka-the-definitive-guide/)
 - [Debezium Postgres Connector Docs](https://debezium.io/documentation/reference/connectors/postgresql.html)
 
 **Storage**
+
 - [Delta Lake Getting Started](https://docs.delta.io/latest/quick-start.html)
 - [Apache Iceberg spec](https://iceberg.apache.org/spec/)
 
 **ML infrastructure**
+
 - [Feast Feature Store Docs](https://docs.feast.dev/)
 - [MLflow Tracking Guide](https://mlflow.org/docs/latest/tracking.html)
 - [ONNX model export guides](https://onnx.ai/sklearn-onnx/)
