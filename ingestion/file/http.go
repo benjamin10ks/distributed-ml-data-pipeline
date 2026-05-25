@@ -11,17 +11,16 @@ type httpAdapter struct {
 	logger *slog.Logger
 }
 
-func NewHTTPAdapter(addr string) *httpAdapter {
+func NewHTTPAdapter(addr string, logger *slog.Logger) (*httpAdapter, error) {
 	return &httpAdapter{
 		addr:   addr,
-		events: make(chan RawEvent, 100), // Buffered channel to hold events
-	}
+		logger: logger,
+		events: make(chan RawEvent, 256), // Buffered channel to hold events
+	}, nil
 }
 
-func (h *httpAdapter) Start() error {
-	mux := http.NewServeMux()
+func (h *httpAdapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ingest/events", h.handleIngest)
-	return http.ListenAndServe(h.addr, mux)
 }
 
 func (h *httpAdapter) Events() <-chan RawEvent {

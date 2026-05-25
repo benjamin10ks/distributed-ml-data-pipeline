@@ -64,27 +64,8 @@ func NewS3Adapter(listenAddr, bucket, endpoint, accessKey, secrectKey string, lo
 	}, nil
 }
 
-func (s *S3Adapter) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
+func (s *S3Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /minio/events", s.handleNotificaion)
-
-	srv := &http.Server{
-		Addr:    s.listenAddr,
-		Handler: mux,
-	}
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
-	s.logger.Info("starting S3 adapter", "listenAddr", s.listenAddr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("failed to start HTTP server: %w", err)
-	}
-	return nil
 }
 
 func (s *S3Adapter) Events() <-chan RawEvent { return s.events }

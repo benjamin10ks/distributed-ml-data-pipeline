@@ -2,11 +2,12 @@ package file
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
 type IngestionsAdapter interface {
-	Start(ctx context.Context) error
+	Register(mux *http.ServeMux)
 	Events() <-chan RawEvent
 }
 
@@ -19,4 +20,8 @@ type RawEvent struct {
 	Size        int64
 	ReceivedAt  time.Time
 	Metadata    map[string]string
+}
+
+type Runner interface {
+	Run(ctx context.Context) error
 }
