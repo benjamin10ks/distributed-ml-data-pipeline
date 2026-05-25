@@ -305,11 +305,17 @@ for i := 0; i < workerCount; i++ {
 ## Local Dev Setup
 
 ```bash
-# Initialize MinIO buckets
-make init
+
+# Set environment variables from .env file
+set -a
+source .env
+set +a
 
 # Start all infrastructure
 make up
+
+# Initialize MinIO buckets
+make init
 
 # Build all Go services
 go build ./...

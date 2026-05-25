@@ -1,3 +1,4 @@
+// Package config provides a centralized way to load and validate configuration from environment variables. It defines a Config struct that holds all the necessary configuration values for the application, such as service name, log level, Kafka settings, Postgres connection details, and Minio credentials. The Load function reads these values from the environment, applies defaults where appropriate, and checks for required fields. If any required configuration is missing or invalid, it returns an error with details about the issue. This approach ensures that the application has a consistent and reliable way to access its configuration throughout its lifecycle.
 package config
 
 import (

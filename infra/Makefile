@@ -10,19 +10,21 @@ endif
 
 .PHONY: up down logs reset build
 
-init:
-	mc alias set local http://minio:9000 minioadmin minioadmin
+init: init-buckets
 
-	mc mb local/landing
-	mc mb local/processed
-	mc mb local/quarantined
+init-buckets:
+	$(COMPOSE) exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
+	$(COMPOSE) exec minio mc mb --ignore-existing local/landing
+	$(COMPOSE) exec minio mc mb --ignore-existing local/processed
+	$(COMPOSE) exec minio mc mb --ignore-existing local/quarantined
 
-	mc event add local/landing arn:minio:sqs::ingestion:webhook --event put
-
-	mc admim config set local notify_webhook:ingestion endpoint=http://host.docker.internal:8080/minio/events \
+init-events:
+	$(COMPOSE) exec minio mc admin config set local notify_webhook:ingestion \
+		endpoint="http://host.docker.internal:8080/minio/events" \
 		queue_limit="10000"
-
-	mc admin service restart local
+	$(COMPOSE) exec minio mc admin service restart local
+	$(COMPOSE) exec minio mc event add local/landing \
+		arn:minio:sqs::ingestion:webhook --event put
 
 up:
 	$(COMPOSE) up -d
