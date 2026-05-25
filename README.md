@@ -242,7 +242,7 @@ As you build, record why you made each of these choices in an `ADR/` (Architectu
 | Concern                 | Library                               |
 | ----------------------- | ------------------------------------- |
 | Kafka producer/consumer | `github.com/twmb/franz-go`            |
-| Postgres                | `github.com/jackc/pgx/v5`             |
+| Postgres                | `github.com/jackc/pgx`                |
 | S3 / SQS                | `github.com/aws/aws-sdk-go-v2`        |
 | Parquet                 | `github.com/parquet-go/parquet-go`    |
 | Redis (feature store)   | `github.com/redis/go-redis/v9`        |
