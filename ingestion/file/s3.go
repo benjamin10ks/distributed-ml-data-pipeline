@@ -18,11 +18,10 @@ import (
 )
 
 type S3Adapter struct {
-	client     *s3.Client
-	bucket     string
-	listenAddr string
-	events     chan RawEvent
-	logger     *slog.Logger
+	client        *s3.Client
+	landingBucket string
+	events        chan RawEvent
+	logger        *slog.Logger
 }
 
 type minioNotification struct {
@@ -40,7 +39,7 @@ type minioNotification struct {
 	} `json:"Records"`
 }
 
-func NewS3Adapter(listenAddr, bucket, endpoint, accessKey, secrectKey string, logger *slog.Logger) (*S3Adapter, error) {
+func NewS3Adapter(landingBucket, endpoint, accessKey, secrectKey string, logger *slog.Logger) (*S3Adapter, error) {
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secrectKey, ""),
@@ -56,11 +55,10 @@ func NewS3Adapter(listenAddr, bucket, endpoint, accessKey, secrectKey string, lo
 	})
 
 	return &S3Adapter{
-		client:     client,
-		bucket:     bucket,
-		listenAddr: listenAddr,
-		events:     make(chan RawEvent, 256),
-		logger:     logger,
+		client:        client,
+		landingBucket: landingBucket,
+		events:        make(chan RawEvent, 256),
+		logger:        logger,
 	}, nil
 }
 
@@ -80,29 +78,29 @@ func (s *S3Adapter) handleNotificaion(w http.ResponseWriter, r *http.Request) {
 
 	for _, rec := range notification.Records {
 		key := rec.S3.Object.Key
-		butcket := rec.S3.Bucket.Name
+		bucket := rec.S3.Bucket.Name
 
-		s.logger.Info("received notification", "bucket", butcket, "key", key)
+		s.logger.Info("received notification", "bucket", bucket, "key", key)
 
-		event, err := s.downloadObject(r.Context(), butcket, key)
+		event, err := s.downloadObject(r.Context(), bucket, key)
 		if err != nil {
-			s.logger.Error("failed to download object", "bucket", butcket, "key", key, "error", err)
+			s.logger.Error("failed to download object", "bucket", bucket, "key", key, "error", err)
 			continue
 		}
 
 		select {
 		case s.events <- event:
 		default:
-			s.logger.Warn("events channel is full, dropping event", "bucket", butcket, "key", key)
+			s.logger.Warn("events channel is full, dropping event", "bucket", bucket, "key", key)
 		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 // Temporary will swap out later with temp files and chuncking for large files
-func (s *S3Adapter) downloadObject(ctx context.Context, butcket, key string) (RawEvent, error) {
+func (s *S3Adapter) downloadObject(ctx context.Context, bucket, key string) (RawEvent, error) {
 	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(butcket),
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
@@ -120,12 +118,12 @@ func (s *S3Adapter) downloadObject(ctx context.Context, butcket, key string) (Ra
 		Source:      "s3",
 		Payload:     body,
 		Format:      detectFormat(key, body),
-		Path:        fmt.Sprintf("s3://%s/%s", butcket, key),
+		Path:        fmt.Sprintf("s3://%s/%s", bucket, key),
 		ContentHash: hex.EncodeToString(h.Sum(nil)),
 		Size:        int64(len(body)),
 		ReceivedAt:  time.Now(),
 		Metadata: map[string]string{
-			"bucket": butcket,
+			"bucket": bucket,
 			"key":    key,
 		},
 	}, nil

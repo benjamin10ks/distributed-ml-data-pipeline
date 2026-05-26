@@ -23,7 +23,6 @@ func main() {
 	mux := http.NewServeMux()
 
 	s3Adapter, err := file.NewS3Adapter(
-		cfg.ListenAddr,
 		cfg.LandingBucket,
 		cfg.S3Endpoint,
 		cfg.S3AccessKey,
@@ -37,7 +36,7 @@ func main() {
 
 	s3Adapter.Register(mux)
 
-	httpAdapter, err := file.NewHTTPAdapter(cfg.ListenAddr, logger)
+	httpAdapter, err := file.NewHTTPAdapter(logger)
 	if err != nil {
 		logger.Error("failed to create HTTP adapter", "error", err)
 		os.Exit(1)
