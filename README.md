@@ -64,7 +64,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 > Implement the file ingestion pipeline: landing zone → manifest → validate → parse → processed storage.
 
 - [x] Create landing zone bucket structure: `source={name}/date={YYYY-MM-DD}/`
-- [ ] Implement **file manifest** table in Postgres (columns: `path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
+- [x] Implement **file manifest** table in Postgres (columns: `path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
 - [x] MinIO event notifications → webhook → buffered channel (implemented)
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
 - [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check) — use `aws-sdk-go-v2` for S3/SQS
