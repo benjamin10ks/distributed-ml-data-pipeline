@@ -1,3 +1,4 @@
+// Package logging provides a structured logging solution using slog, with support for context-based trace IDs and configurable log levels.
 package logging
 
 import (
