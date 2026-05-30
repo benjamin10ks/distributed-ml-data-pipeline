@@ -20,6 +20,10 @@ func main() {
 	logger := logging.NewLogger("ingestion-file", cfg.LogLevel)
 	slog.SetDefault(logger)
 
+	if err := file.RunMigrations(cfg.DatabaseURL); err != nil {
+		logger.Error("failed to run database migrations", "error", err)
+	}
+
 	mux := http.NewServeMux()
 
 	s3Adapter, err := file.NewS3Adapter(

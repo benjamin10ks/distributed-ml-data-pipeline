@@ -15,6 +15,7 @@ type WorkerConfig struct {
 	Adapters         []IngestionsAdapter
 	ProcessedBucket  string
 	QuarantineBucket string
+	manifest         *Manifest
 	DB               *sql.DB
 	Logger           *slog.Logger
 }
