@@ -44,6 +44,20 @@ func (m *Manifest) Insert(ctx context.Context, entry ManifestEntry) error {
 	return err
 }
 
+func (m *Manifest) GetByHash(ctx context.Context, contentHash string) (*ManifestEntry, error) {
+	row := m.db.QueryRow(ctx, `
+		SELECT id, path, content_hash, source, status, created_at, processed_at
+		FROM file_manifest WHERE content_hash = $1
+		`, contentHash)
+
+	var e ManifestEntry
+	err := row.Scan(&e.Path, &e.ContentHash, &e.Source, &e.Status, &e.CreatedAt, &e.ProcessedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
 func (m *Manifest) UpdateStatus(ctx context.Context, contentHash string, status ManifestStatus) error {
 	var processedAt *time.Time
 	if status == StatusDone || status == StatusFailed || status == StatusQuarantined {
