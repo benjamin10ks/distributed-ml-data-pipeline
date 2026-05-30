@@ -69,12 +69,12 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
 - [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check) — use `aws-sdk-go-v2` for S3/SQS
 - [ ] Implement validation checks: file size bounds, format sniffing, checksum verification (`crypto/sha256` stdlib)
-- [ ] Build CSV parser with chunking (target 128MB chunks) — use `encoding/csv` stdlib, handle quoted fields
-- [ ] Build Parquet parser (read row groups independently for parallelism) — use `github.com/parquet-go/parquet-go`
-- [ ] Add NDJSON support using `encoding/json` with a streaming decoder (`json.NewDecoder` + loop)
+- [x] Build CSV parser with chunking (target 128MB chunks) — use `encoding/csv` stdlib, handle quoted fields
+- [x] Build Parquet parser (read row groups independently for parallelism) — use `github.com/parquet-go/parquet-go`
+- [x] Add NDJSON support using `encoding/json` with a streaming decoder (`json.NewDecoder` + loop)
 - [ ] Write parsed output to processed storage as Snappy-compressed Parquet, 128–256MB files
 - [ ] Implement quarantine bucket + alerting for validation failures
-- [ ] Update manifest status on success / failure / quarantine — use `pgx/v5` for Postgres
+- [x] Update manifest status on success / failure / quarantine — use `pgx/v5` for Postgres
 - [ ] Write integration test: upload a file, assert it appears in processed storage with correct hash
 
 ---
