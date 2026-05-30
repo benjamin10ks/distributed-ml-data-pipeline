@@ -1,11 +1,13 @@
 package file
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/benjamin10ks/distributed-ml-data-pipeline/ingestion/file/parser"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -130,5 +132,38 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 	}
 
 	log.Info("file processed successfully")
+	return nil
+}
+
+func (w *Worker) quarantine(ctx context.Context, event RawEvent) error {
+	_, err := w.cfg.S3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: &w.cfg.QuarantineBucket,
+		Key:    &event.Path,
+		Body:   bytes.NewReader(event.Payload),
+	})
+	return err
+}
+
+type Record map[string]any
+
+func (w *Worker) writeProcessed(ctx context.Context, event RawEvent, records []parser.Record) (string, error) {
+	var buf bytes.Buffer
+
+	for _, record := range records {
+		if _, err := fmt.Fprintf(&buf, "%v\n", record); err != nil {
+			return "", fmt.Errorf("failed to write record to buffer: %w", err)
+		}
+	}
+
+	_, err := w.cfg.S3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: &w.cfg.ProcessedBucket,
+		Key:    &event.Path,
+		Body:   bytes.NewReader(buf.Bytes()),
+	})
+	return event.Path, err
+}
+
+// TODO: publish event to Kafka
+func (w *Worker) publishProcessed(ctx context.Context, event RawEvent, processedKey string) error {
 	return nil
 }

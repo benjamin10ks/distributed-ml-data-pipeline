@@ -1,5 +1,10 @@
 package file
 
+// TODO: implement validation logic for the event. check if the file is not empty, if the format is supported, etc.
+func validate(event RawEvent) error {
+	return nil
+}
+
 // sniffs for file type -- parquet, csv, ndjson. based on file extension or content
 func detectFormat(key string, body []byte) string {
 	if len(body) >= 4 && string(body[:4]) == "PAR1" {
