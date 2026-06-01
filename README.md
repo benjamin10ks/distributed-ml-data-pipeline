@@ -11,31 +11,32 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        INGESTION LAYER                      │
-│  APIs / Webhooks   File Drops    DB Change Streams   IoT    │
-│  (REST, gRPC)      (S3, GCS)     (CDC, Debezium)   (MQTT)  │
+│  HTTP Push         File Drops        DB Change Streams      │
+│  (POST /ingest)    (MinIO/S3)        (CDC, Debezium)        │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
 │                    STREAMING LAYER                          │
-│          Kafka · Pulsar · Kinesis                           │
-│     Partitioned, durable, replayable event bus             │
+│                    Kafka (franz-go)                         │
+│          Partitioned, durable, replayable event bus         │
 └──────────┬──────────────┬──────────────┬────────────────────┘
            │              │              │
 ┌──────────▼──┐   ┌───────▼──────┐  ┌───▼─────────────────────┐
 │  Validate   │   │   Feature    │  │  Distributed Compute    │
-│  + Filter   │   │  Engineering │  │  (Spark, Ray, Dask)     │
+│  + Filter   │   │  Engineering │  │  (Go worker pools)      │
 └──────────┬──┘   └───────┬──────┘  └───┬─────────────────────┘
            └──────────────┼─────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
 │                      STORAGE LAYER                          │
 │   Feature Store        Data Lakehouse      Model Registry   │
-│   (Feast, Tecton)    (Parquet, Delta)    (MLflow, DVC)      │
+│   (Redis + Feast)    (Parquet, Delta)      (MLflow)         │
 └──────────┬──────────────┬──────────────┬────────────────────┘
            │              │              │
 ┌──────────▼──┐   ┌───────▼──────┐  ┌───▼─────────────────────┐
 │  Real-time  │   │    Batch     │  │      Monitoring         │
-│  Inference  │   │  Prediction  │  │   (Drift, Data Quality) │
+│  Inference  │   │  Prediction  │  │   (Drift, Prometheus)   │
+│  (ONNX)     │   │              │  │                         │
 └─────────────┘   └──────────────┘  └─────────────────────────┘
 ```
 
@@ -43,7 +44,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 ## Build Checklist
 
-### Phase 1 — Foundation & Infrastructure
+### Phase 1 — Foundation & Infrastructure ✅
 
 > Get the skeleton standing. Nothing works end-to-end yet, but the core services are running locally.
 
@@ -59,23 +60,65 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 ---
 
-### Phase 2 — File-Based Ingestion
+### Phase 2 — File-Based Ingestion 🔧 In Progress
 
 > Implement the file ingestion pipeline: landing zone → manifest → validate → parse → processed storage.
 
-- [x] Create landing zone bucket structure: `source={name}/date={YYYY-MM-DD}/`
-- [x] Implement **file manifest** table in Postgres (columns: `path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
-- [x] MinIO event notifications → webhook → buffered channel (implemented)
+**Ingestion adapter layer**
+
+- [x] Define `IngestionAdapter` interface (`Register(mux)` + `Events() <-chan RawEvent`) in `ingestion/adapter.go`
+- [x] Define `RawEvent` envelope type (`Source`, `Payload`, `Format`, `Path`, `ContentHash`, `Size`, `ReceivedAt`, `Metadata`)
+- [x] Define optional `Runner` interface for adapters that need a background goroutine (CDC will use this)
+- [x] Build S3 adapter (`ingestion/s3.go`) — registers `POST /minio/events`, downloads object, hashes with SHA-256 via `TeeReader`, emits `RawEvent`
+- [x] Wire MinIO webhook notifications → shared `http.Server` → S3 adapter handler
+- [x] Build HTTP adapter (`ingestion/http.go`) — registers `POST /ingest/events/{source}`, writes payload to landing bucket, emits `RawEvent`
+- [x] Share a single `http.Server` and `ServeMux` across all adapters — instantiated in `main.go`, adapters call `Register(mux)`
+
+**Landing zone**
+
+- [x] Create MinIO buckets: `landing`, `processed`, `quarantine` via `make init` (`mc` CLI)
+- [x] Key structure: `source={name}/date={YYYY-MM-DD}/{filename}` — constructed by HTTP adapter on write, read from notification key by S3 adapter
+- [x] Configure MinIO webhook notification on `s3:ObjectCreated` events → `POST /minio/events`
+
+**File manifest**
+
+- [x] Create `file_manifest` table (`path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
+- [x] Partial index on `status` for `pending` and `processing` rows only
+- [x] `Manifest` struct in `ingestion/manifest.go` with `Insert`, `GetByHash`, `UpdateStatus`, `GetStuck`
+- [x] Status constants: `pending → processing → done | failed | quarantined`
+- [x] `GetStuck` queries entries in `processing` older than a threshold — used on restart to recover crashed workers
+- [x] DB connection pool (`pgx/v5`) opened in `main.go`, injected into `Manifest` and `Worker`
+
+**Worker**
+
+- [x] `Worker` in `ingestion/worker.go` merges all adapter channels into one stream via a fan-in goroutine per adapter
+- [x] Sequential `process()` loop for now — Phase 6 replaces with bounded `errgroup` worker pool
+- [x] `process()` sequence: idempotency check → manifest insert → `processing` → validate → parse → write processed → `done` → publish Kafka event
+- [x] Kafka publish failure does not fail the operation — file is safely stored, publish retried via manifest query
+- [x] Bad files log and continue — one quarantined file does not stop the pipeline
+
+**Parsers**
+
+- [x] `Parser` interface (`Parse(io.Reader) ([]Record, error)`) in `ingestion/parser/parser.go`
+- [x] `Record` type: `map[string]any` — preserves native types, coercion deferred to feature engineering
+- [x] `For(format string) (Parser, error)` factory — dispatches on `"csv"`, `"parquet"`, `"ndjson"`
+- [x] CSV parser (`ingestion/parser/csv.go`) — `encoding/csv` stdlib, `ReuseRecord` for reduced allocations, copies header row
+- [x] NDJSON parser (`ingestion/parser/ndjson.go`) — `json.NewDecoder` streaming loop
+- [x] Parquet parser (`ingestion/parser/parquet.go`) — `parquet-go`, reads in 128-row chunks via `GenericReader`
+- [x] `parse.go` in `ingestion/` — seam between `RawEvent` and parser package; only file that knows both types
+- [x] Format detection (`detectFormat`) — magic bytes take precedence over file extension
+
+**Still to do**
+
+- [ ] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
+- [ ] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
+- [ ] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `ingestion.processed` topic
+- [ ] `publishProcessed` and `writeProcessed` implementations called by worker
+- [ ] `mustOpenDB` implementation in `main.go`
+- [ ] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
+- [ ] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
-- [ ] Build arrival detection worker (polls queue, deduplicates via manifest hash check) — use `aws-sdk-go-v2` for S3/SQS
-- [ ] Implement validation checks: file size bounds, format sniffing, checksum verification (`crypto/sha256` stdlib)
-- [x] Build CSV parser with chunking (target 128MB chunks) — use `encoding/csv` stdlib, handle quoted fields
-- [x] Build Parquet parser (read row groups independently for parallelism) — use `github.com/parquet-go/parquet-go`
-- [x] Add NDJSON support using `encoding/json` with a streaming decoder (`json.NewDecoder` + loop)
-- [ ] Write parsed output to processed storage as Snappy-compressed Parquet, 128–256MB files
-- [ ] Implement quarantine bucket + alerting for validation failures
-- [x] Update manifest status on success / failure / quarantine — use `pgx/v5` for Postgres
-- [ ] Write integration test: upload a file, assert it appears in processed storage with correct hash
+- [ ] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`
 
 ---
 
@@ -94,6 +137,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Add replication slot lag monitoring (`pg_replication_slots` → alert if lag > threshold)
 - [ ] Run initial snapshot test: connect Debezium to a table with existing rows, verify read events
 - [ ] Write consumer that reads CDC events and prints before/after diffs (smoke test)
+- [ ] Add `cdc.go` to `ingestion/` implementing the `Runner` interface (no HTTP routes — background goroutine only)
 
 ---
 
@@ -101,7 +145,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > Harden the event bus: producers, consumers, schema enforcement, and observability.
 
-- [ ] Choose Go Kafka client: `github.com/twmb/franz-go` (recommended, full-featured) or `confluent-kafka-go` (CGO, closer to librdkafka)
+- [x] Kafka client chosen: `github.com/twmb/franz-go` (pure Go, no CGO)
 - [ ] Define topic partitioning strategy per source (CDC: by PK, files: by source name)
 - [ ] Set retention policies per topic (raw events: 7 days, processed: 30 days)
 - [ ] Implement a generic Kafka producer with retry logic and idempotent writes enabled
@@ -126,7 +170,8 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [ ] Build a `FeaturePipeline` struct that chains transforms — serialize pipeline config to JSON for reproducibility
 - [ ] **Critical**: verify training-time and serving-time transforms produce identical output for the same input (training-serving skew test)
 - [ ] Add data type validation at pipeline boundaries (reject unexpected nulls, out-of-range values)
-- [ ] Write a backfill job that recomputes features over historical Parquet files using a worker pool (use `errgroup` from `golang.org/x/sync`)
+- [ ] Note: CSV records arrive as `map[string]string` — type coercion from `Record` (`map[string]any`) happens here, not in the parser
+- [ ] Write a backfill job that recomputes features over historical Parquet files using a worker pool (`errgroup` from `golang.org/x/sync`)
 - [ ] Benchmark transform throughput (target: process 1M rows/minute on a single node)
 
 ---
@@ -137,7 +182,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 > **Go note**: Rather than Spark or Ray (JVM/Python ecosystems), Go-native distribution uses Kafka partitions as the work distribution mechanism — each worker consumes one or more partitions concurrently. This is a cleaner mental model and performs well for moderate data volumes (< 10TB/day).
 
-- [ ] Implement a `WorkerPool` using goroutines + a buffered channel as the job queue — configurable concurrency via `WORKER_COUNT` env var
+- [ ] Replace sequential `process()` loop in worker with bounded `errgroup` pool — configurable via `WORKER_COUNT` env var
 - [ ] Use `errgroup` (`golang.org/x/sync/errgroup`) for fan-out with coordinated error propagation
 - [ ] Port the CSV chunking parser to fan out chunks across the worker pool — track chunk offsets for resumability
 - [ ] Port feature engineering pipeline to process Parquet row groups in parallel (one goroutine per row group)
@@ -171,10 +216,11 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 **Model Registry**
 
-- [ ] Set up MLflow tracking server (backed by Postgres for metadata, MinIO for artifacts)
+- [ ] Add `mlflow` bucket to MinIO via `make init`
+- [ ] Add MLflow tracking server to `docker-compose.yml` (Postgres backend + MinIO artifact store)
 - [ ] Log a dummy model run: params, metrics, and a serialized model artifact
 - [ ] Implement model versioning: promote a model from `Staging` to `Production`
-- [ ] Write a model loader that fetches the current `Production` model by name at startup
+- [ ] Write Go model loader using MLflow REST API — fetches current `Production` version by name, downloads ONNX artifact from MinIO
 
 ---
 
@@ -222,17 +268,28 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 ---
 
-## Key Design Decisions to Document
+## Key Design Decisions
 
-As you build, record why you made each of these choices in an `ADR/` (Architecture Decision Records) folder:
+Recorded in `ADR/` as decisions are made.
 
-- [ ] **Message format**: Avro vs Protobuf vs JSON — and why
-- [ ] **Compute approach**: Kafka-partition-based workers vs external Spark cluster — and why
-- [ ] **Feature store**: Feast vs Tecton vs custom Redis-backed store — and why
-- [ ] **Orchestrator**: Temporal vs Airflow — and why
-- [ ] **Inference runtime**: ONNX Runtime in-process vs external model server (TF Serving/Triton) — and why
-- [ ] **Exactly-once semantics**: how you achieve it (or why you settled for at-least-once + idempotency)
-- [ ] **Training-serving skew**: how your architecture prevents it
+| Decision                     | Choice                                                                  | Status     |
+| ---------------------------- | ----------------------------------------------------------------------- | ---------- |
+| Kafka client                 | `franz-go` (pure Go, no CGO)                                            | ✅ decided |
+| Postgres client              | `pgx/v5`                                                                | ✅ decided |
+| S3 client                    | `aws-sdk-go-v2`                                                         | ✅ decided |
+| Parquet library              | `parquet-go`                                                            | ✅ decided |
+| HTTP routing                 | stdlib `net/http` + `ServeMux`                                          | ✅ decided |
+| Adapter pattern              | `Register(mux)` + shared server                                         | ✅ decided |
+| CDC adapter                  | `Runner` interface, not HTTP                                            | ✅ decided |
+| Ingestion package layout     | Flat `ingestion/` package                                               | ✅ decided |
+| Infra config (Debezium etc.) | `infra/debezium/` not `ingestion/`                                      | ✅ decided |
+| Compute framework            | Go-native worker pools, not Spark/Ray                                   | ✅ decided |
+| Orchestrator                 | Temporal (pending Phase 9)                                              | ⏳ pending |
+| Inference runtime            | ONNX in-process vs gRPC sidecar                                         | ⏳ pending |
+| Feature store                | Feast + Redis vs custom Redis                                           | ⏳ pending |
+| Message format               | Avro vs Protobuf vs JSON                                                | ⏳ pending |
+| Exactly-once semantics       | At-least-once + idempotent manifest                                     | ✅ decided |
+| Training-serving skew        | Feature pipeline serialized to JSON, same code path for train and serve | ⏳ pending |
 
 ---
 
@@ -243,11 +300,12 @@ As you build, record why you made each of these choices in an `ADR/` (Architectu
 | Concern                 | Library                               |
 | ----------------------- | ------------------------------------- |
 | Kafka producer/consumer | `github.com/twmb/franz-go`            |
-| Postgres                | `github.com/jackc/pgx`                |
+| Postgres                | `github.com/jackc/pgx/v5`             |
 | S3 / SQS                | `github.com/aws/aws-sdk-go-v2`        |
 | Parquet                 | `github.com/parquet-go/parquet-go`    |
 | Redis (feature store)   | `github.com/redis/go-redis/v9`        |
 | Prometheus metrics      | `github.com/prometheus/client_golang` |
+| HTTP routing            | stdlib `net/http`                     |
 | ONNX inference          | `github.com/yalue/onnxruntime_go`     |
 | Concurrency             | `golang.org/x/sync/errgroup`          |
 | Workflow orchestration  | `go.temporal.io/sdk`                  |
@@ -268,7 +326,7 @@ For **the feature store**, Feast is Python-native. Options: run Feast's material
 // Fan-out: process N files concurrently, collect errors
 g, ctx := errgroup.WithContext(ctx)
 for _, file := range files {
-    file := file // capture loop variable
+    file := file
     g.Go(func() error {
         return processFile(ctx, file)
     })
@@ -306,16 +364,13 @@ for i := 0; i < workerCount; i++ {
 ## Local Dev Setup
 
 ```bash
-
-# Set environment variables from .env file
-set -a
-source .env
-set +a
+# Set environment variables
+set -a && source .env && set +a
 
 # Start all infrastructure
 make up
 
-# Initialize MinIO buckets
+# Initialize MinIO buckets and notifications
 make init
 
 # Build all Go services
@@ -324,15 +379,17 @@ go build ./...
 # Verify Kafka is healthy
 docker exec -it kafka kafka-topics.sh --list --bootstrap-server localhost:9092
 
-# Verify Postgres replication slot (for CDC)
+# Verify Postgres replication slot (for CDC, Phase 3)
 psql -U postgres -c "SELECT slot_name, active FROM pg_replication_slots;"
 
 # Upload a test file to MinIO landing zone
-aws s3 cp tests/fixtures/sample.csv s3://landing/source=test/date=2026-05-17/ \
+aws s3 cp tests/fixtures/sample.csv \
+  s3://landing/source=test/date=2026-05-17/sample.csv \
   --endpoint-url http://localhost:9000
 
 # Watch the file manifest
-psql -U postgres -c "SELECT path, status, content_hash FROM file_manifest ORDER BY created_at DESC LIMIT 10;"
+psql -U postgres -c \
+  "SELECT path, status, content_hash FROM file_manifest ORDER BY created_at DESC LIMIT 10;"
 
 # Run all tests
 go test ./... -race -timeout 120s
@@ -347,41 +404,52 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 
 ```
 .
-├── ingestion/
-│   ├── file/           # File-based ingestion worker (Go)
-│   │   ├── cmd/main.go
-│   │   ├── detector.go
-│   │   ├── manifest.go
-│   │   ├── parser/
-│   │   │   ├── csv.go
-│   │   │   ├── parquet.go
-│   │   │   └── ndjson.go
-│   │   └── validator.go
-│   └── cdc/            # Debezium config + CDC event consumer (Go)
+├── ingestion/                  # Flat package — all ingestion code lives here
+│   ├── cmd/
+│   │   └── main.go             # Wires config, adapters, shared mux, worker
+│   ├── adapter.go              # IngestionAdapter interface, Runner interface, RawEvent
+│   ├── s3.go                   # S3/MinIO adapter (Register + webhook handler)
+│   ├── http.go                 # HTTP push adapter (Register + POST /ingest/events/{source})
+│   ├── cdc.go                  # CDC adapter — Phase 3 (implements Runner, no HTTP routes)
+│   ├── worker.go               # Fan-in merge, sequential process() loop
+│   ├── parse.go                # Seam: translates RawEvent → parser.Input → []Record
+│   ├── validate.go             # Size bounds, magic bytes, checksum — TODO
+│   ├── store.go                # Write Parquet to processed bucket — TODO
+│   ├── kafka.go                # Publish processed event to Kafka — TODO
+│   ├── manifest.go             # ManifestEntry, Manifest struct, DB operations
+│   ├── config.go               # ConfigFromEnv, requireEnv, getEnv
+│   ├── migrations/
+│   │   └── 001_file_manifest.sql
+│   └── parser/
+│       ├── parser.go           # Parser interface, Record type, For() factory
+│       ├── csv.go
+│       ├── parquet.go
+│       └── ndjson.go
 ├── streaming/
-│   └── kafka/          # Producer/consumer base types, topic configs (Go)
+│   └── kafka/                  # Generic producer/consumer base types (Phase 4)
 ├── processing/
-│   ├── features/       # Feature interface + transform implementations (Go)
-│   └── compute/        # Worker pool jobs (Go)
+│   ├── features/               # Feature interface + transforms (Phase 5)
+│   └── compute/                # Worker pool jobs (Phase 6)
 ├── storage/
-│   ├── lakehouse/      # Parquet/Delta write helpers (Go)
-│   ├── feature_store/  # Redis online store client (Go) + Feast config (Python)
-│   └── registry/       # MLflow REST client (Go)
+│   ├── lakehouse/              # Parquet/Delta write helpers (Phase 7)
+│   ├── feature_store/          # Redis client + Feast config (Phase 7)
+│   └── registry/               # MLflow REST client (Phase 7)
 ├── serving/
-│   ├── inference/      # net/http inference service + ONNX loader (Go)
-│   └── batch/          # Batch prediction worker pool (Go)
+│   ├── inference/              # net/http + ONNX inference service (Phase 8)
+│   └── batch/                  # Batch prediction worker pool (Phase 8)
 ├── orchestration/
-│   └── workflows/      # Temporal workflow and activity definitions (Go)
+│   └── workflows/              # Temporal workflow + activity definitions (Phase 9)
 ├── monitoring/
-│   ├── dashboards/     # Grafana dashboard JSON exports
-│   └── alerts/         # Prometheus alerting rules
+│   ├── dashboards/             # Grafana JSON exports (Phase 10)
+│   └── alerts/                 # Prometheus alerting rules (Phase 10)
 ├── infra/
 │   ├── docker-compose.yml
-│   └── Makefile
+│   ├── Makefile
+│   └── debezium/               # Debezium connector JSON config (Phase 3)
 ├── tests/
-│   ├── fixtures/       # Sample CSV, Parquet, NDJSON files
-│   └── integration/    # End-to-end pipeline tests (Go)
-├── ADR/                # Architecture Decision Records
+│   ├── fixtures/               # sample.csv, sample.parquet, sample.ndjson
+│   └── integration/            # End-to-end pipeline tests
+├── ADR/                        # Architecture Decision Records
 └── README.md
 ```
 
