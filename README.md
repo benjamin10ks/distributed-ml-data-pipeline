@@ -110,8 +110,8 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 **Still to do**
 
-- [ ] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
-- [ ] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
+- [x] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
+- [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
 - [x] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `files.processed` topic
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [ ] `mustOpenDB` implementation in `main.go`
