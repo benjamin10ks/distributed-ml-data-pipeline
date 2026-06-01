@@ -112,10 +112,10 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 - [ ] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
 - [ ] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
-- [ ] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `ingestion.processed` topic
-- [ ] `publishProcessed` and `writeProcessed` implementations called by worker
+- [x] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `files.processed` topic
+- [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [ ] `mustOpenDB` implementation in `main.go`
-- [ ] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
+- [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
 - [ ] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
 - [ ] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`

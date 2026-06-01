@@ -162,8 +162,3 @@ func (w *Worker) writeProcessed(ctx context.Context, event RawEvent, records []p
 	})
 	return event.Path, err
 }
-
-// TODO: publish event to Kafka
-func (w *Worker) publishProcessed(ctx context.Context, event RawEvent, processedKey string) error {
-	return nil
-}

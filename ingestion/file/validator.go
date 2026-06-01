@@ -1,7 +1,42 @@
 package file
 
-// TODO: implement validation logic for the event. check if the file is not empty, if the format is supported, etc.
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+)
+
+const (
+	MaxFileSize = 500 * 1024 * 1024 // 500 MB
+)
+
+// TODO: Add more data type support for images, videos, audio, etc. based on file signature and extension
 func validate(event RawEvent) error {
+	format := detectFormat(event.Path, event.Payload)
+	if format == "unknown" {
+		return fmt.Errorf("unsupported file format")
+	}
+
+	if len(event.Payload) == 0 {
+		return fmt.Errorf("file is empty")
+	}
+
+	if len(event.Payload) > MaxFileSize {
+		return fmt.Errorf("file size exceeds maximum limit of %d bytes", MaxFileSize)
+	}
+
+	h := sha256.New()
+	_, err := io.ReadAll(io.TeeReader(bytes.NewReader(event.Payload), h))
+	if err != nil {
+		return fmt.Errorf("failed to read payload for hashing: %w", err)
+	}
+	hash := hex.EncodeToString(h.Sum(nil))
+	if hash != event.ContentHash {
+		return fmt.Errorf("content hash mismatch: expected %s, got %s", event.ContentHash, hash)
+	}
+
 	return nil
 }
 
