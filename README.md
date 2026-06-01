@@ -114,7 +114,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
 - [x] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `files.processed` topic
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
-- [ ] `mustOpenDB` implementation in `main.go`
+- [x] `mustOpenDB` implementation in `main.go`
 - [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
 - [ ] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
@@ -286,7 +286,7 @@ Recorded in `ADR/` as decisions are made.
 | Compute framework            | Go-native worker pools, not Spark/Ray                                   | ✅ decided |
 | Orchestrator                 | Temporal (pending Phase 9)                                              | ⏳ pending |
 | Inference runtime            | ONNX in-process vs gRPC sidecar                                         | ⏳ pending |
-| Feature store                | Feast + Redis vs custom Redis                                           | ⏳ pending |
+| Feature store                | Custom Redis                                                            | ✅ decided |
 | Message format               | Avro vs Protobuf vs JSON                                                | ⏳ pending |
 | Exactly-once semantics       | At-least-once + idempotent manifest                                     | ✅ decided |
 | Training-serving skew        | Feature pipeline serialized to JSON, same code path for train and serve | ⏳ pending |
