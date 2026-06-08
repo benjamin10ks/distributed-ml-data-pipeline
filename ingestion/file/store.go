@@ -114,13 +114,37 @@ func (w *Worker) putProcessedManifest(ctx context.Context, key string, manifest 
 }
 
 func encodeParquet(records []parser.Record) ([]byte, error) {
+	if len(records) == 0 {
+		return nil, fmt.Errorf("cannot encode empty records")
+	}
+
+	// Union all keys across all records so sparse rows don't lose columns
+	seen := make(map[string]struct{})
+	for _, rec := range records {
+		for k := range rec {
+			seen[k] = struct{}{}
+		}
+	}
+
+	// Build schema from discovered keys
+	group := make(parquet.Group)
+	for k := range seen {
+		group[k] = parquet.Optional(parquet.String())
+	}
+	schema := parquet.NewSchema("record", group)
+
 	var buf bytes.Buffer
-	writer := parquet.NewGenericWriter[parser.Record](&buf, parquet.Compression(&parquet.Snappy))
+	writer := parquet.NewGenericWriter[map[string]any](
+		&buf,
+		schema,
+		parquet.Compression(&parquet.Snappy),
+	)
+
 	if _, err := writer.Write(records); err != nil {
-		return nil, fmt.Errorf("failed to write parquet records: %w", err)
+		return nil, fmt.Errorf("write parquet records: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close parquet writer: %w", err)
+		return nil, fmt.Errorf("close parquet writer: %w", err)
 	}
 	return buf.Bytes(), nil
 }

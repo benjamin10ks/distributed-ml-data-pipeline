@@ -21,10 +21,6 @@ func main() {
 	logger := logging.NewLogger("ingestion-file", cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	if err := file.RunMigrations(cfg.DatabaseURL); err != nil {
-		logger.Error("failed to run database migrations", "error", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -66,6 +62,10 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create worker", "error", err)
 		os.Exit(1)
+	}
+
+	if err := file.RunMigrations(cfg.DatabaseURL); err != nil {
+		logger.Error("failed to run database migrations", "error", err)
 	}
 
 	go func() {

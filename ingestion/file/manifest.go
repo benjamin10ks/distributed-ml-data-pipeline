@@ -3,6 +3,7 @@ package file
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,33 +29,41 @@ type ManifestEntry struct {
 }
 
 type Manifest struct {
-	db *pgxpool.Pool
+	db     *pgxpool.Pool
+	logger *slog.Logger
 }
 
-func NewManifest(db *pgxpool.Pool) *Manifest {
-	return &Manifest{db: db}
+func NewManifest(db *pgxpool.Pool, logger *slog.Logger) *Manifest {
+	return &Manifest{db: db, logger: logger}
 }
 
 func (m *Manifest) Insert(ctx context.Context, entry ManifestEntry) error {
+	createdAt := entry.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
 	_, err := m.db.Exec(ctx, `
 		INSERT INTO file_manifest (path, content_hash, source, status, created_at)
 		VALUES ( $1, $2, $3, $4, $5 )
 		ON CONFLICT (content_hash) DO NOTHING
-		`, entry.Path, entry.ContentHash, entry.Source, StatusPending)
+		`, entry.Path, entry.ContentHash, entry.Source, StatusPending, createdAt)
+	m.logger.Info("inserted manifest entry", "path", entry.Path, "content_hash", entry.ContentHash, "source", entry.Source)
 	return err
 }
 
 func (m *Manifest) GetByHash(ctx context.Context, contentHash string) (*ManifestEntry, error) {
 	row := m.db.QueryRow(ctx, `
-		SELECT id, path, content_hash, source, status, created_at, processed_at
+		SELECT path, content_hash, source, status, created_at, processed_at
 		FROM file_manifest WHERE content_hash = $1
 		`, contentHash)
 
+	m.logger.Info("querying manifest entry by hash", "content_hash", contentHash)
 	var e ManifestEntry
 	err := row.Scan(&e.Path, &e.ContentHash, &e.Source, &e.Status, &e.CreatedAt, &e.ProcessedAt)
 	if err != nil {
 		return nil, err
 	}
+	m.logger.Info("found manifest entry", "path", e.Path, "content_hash", e.ContentHash, "source", e.Source, "status", e.Status)
 	return &e, nil
 }
 
@@ -69,15 +78,18 @@ func (m *Manifest) UpdateStatus(ctx context.Context, contentHash string, status 
 		SET status = $1, processed_at = $2
 		WHERE content_hash = $3
 		`, status, processedAt, contentHash)
+
+	m.logger.Info("updated manifest entry status", "content_hash", contentHash, "status", status)
 	return err
 }
 
 func (m *Manifest) GetStuck(ctx context.Context, olderThan time.Duration) ([]ManifestEntry, error) {
 	rows, err := m.db.Query(ctx, `
-		SELECT id, path, content_hash, source, status, created_at, processed_at
+		SELECT path, content_hash, source, status, created_at, processed_at
 		FROM file_manifest
 		WHERE status = 'processing' AND created_at < NOW() - $1::interval
 		`, fmt.Sprintf("%d seconds", int(olderThan.Seconds())))
+	m.logger.Info("querying stuck manifest entries", "older_than_seconds", int(olderThan.Seconds()))
 	if err != nil {
 		return nil, err
 	}
@@ -91,5 +103,6 @@ func (m *Manifest) GetStuck(ctx context.Context, olderThan time.Duration) ([]Man
 		}
 		entries = append(entries, entry)
 	}
+	m.logger.Info("found stuck manifest entries", "count", len(entries))
 	return entries, nil
 }

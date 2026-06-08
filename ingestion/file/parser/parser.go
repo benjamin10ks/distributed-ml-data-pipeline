@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-type Record map[string]any
+type Record = map[string]any
 
 type Parser interface {
 	Parse(r io.Reader) ([]Record, error)

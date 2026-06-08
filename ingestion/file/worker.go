@@ -29,7 +29,7 @@ type Worker struct {
 func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	return &Worker{
 		cfg:      cfg,
-		manifest: NewManifest(cfg.DB),
+		manifest: NewManifest(cfg.DB, cfg.Logger),
 	}, nil
 }
 
@@ -77,8 +77,16 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 		return fmt.Errorf("failed to check manifest: %w", err)
 	}
 	if existing != nil {
-		log.Info("skipping already processed file")
-		return nil
+		switch existing.Status {
+		case StatusDone:
+			log.Info("file already processed successfully, skipping")
+			return nil
+		case StatusProcessing:
+			log.Info("file is currently being processed by another worker, skipping")
+		case StatusFailed, StatusQuarantined:
+			log.Warn("file was previously processed but failed or quarantined, skipping", "previous_status", existing.Status)
+			return nil
+		}
 	}
 
 	// Record in manifest as pending
@@ -89,11 +97,13 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 	}); err != nil {
 		return fmt.Errorf("failed to insert manifest entry: %w", err)
 	}
+	log.Info("manifest entry created, starting processing")
 
 	err = w.manifest.UpdateStatus(ctx, event.ContentHash, StatusProcessing)
 	if err != nil {
 		log.Error("failed to update manifest status to processing", "error", err)
 	}
+	log.Info("file marked as processing")
 
 	// Validate file
 	if err := validate(event); err != nil {
@@ -101,15 +111,20 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 		if qErr := w.quarantine(ctx, event); qErr != nil {
 			log.Error("failed to quarantine file", "error", qErr)
 		}
-		_ = w.manifest.UpdateStatus(ctx, event.ContentHash, StatusQuarantined)
+		if mErr := w.manifest.UpdateStatus(ctx, event.ContentHash, StatusQuarantined); mErr != nil {
+			return fmt.Errorf("failed to update manifest status to quarantined: %w", mErr)
+		}
 		return nil
 	}
+	log.Info("file validated successfully")
 
 	// Parse file
 	records, err := parse(event)
 	if err != nil {
 		log.Error("parsing failed", "reason", err)
-		_ = w.manifest.UpdateStatus(ctx, event.ContentHash, StatusFailed)
+		if mErr := w.manifest.UpdateStatus(ctx, event.ContentHash, StatusFailed); mErr != nil {
+			return fmt.Errorf("failed to update manifest status to failed: %w", mErr)
+		}
 		return fmt.Errorf("failed to parse file: %w", err)
 	}
 	log.Info("file parsed successfully", "record_count", len(records))
@@ -120,6 +135,7 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 		_ = w.manifest.UpdateStatus(ctx, event.ContentHash, StatusFailed)
 		return fmt.Errorf("failed to write processed file: %w", err)
 	}
+	log.Info("file written to processed bucket", "processed_key", processedKey)
 
 	// Mark done
 	if err := w.manifest.UpdateStatus(ctx, event.ContentHash, StatusDone); err != nil {

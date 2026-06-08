@@ -118,7 +118,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
 - [ ] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
-- [ ] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`
+- [x] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`
 
 ---
 
