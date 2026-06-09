@@ -2,7 +2,7 @@
 
 A distributed, production-grade ML data pipeline covering ingestion, streaming, feature engineering, storage, and model serving. Built as a summer learning project in **Go**, touching systems design, distributed computing, data engineering, and ML infrastructure.
 
-> **Language note**: The pipeline services (ingestion workers, Kafka consumers/producers, inference API, orchestration) are written in Go. External infrastructure that runs as its own process — Debezium, MLflow, Feast — is language-agnostic and communicates over HTTP/gRPC. The distributed compute layer uses Go-native workers rather than Spark/Ray. See [Go-specific considerations](#go-specific-considerations) below.
+> **Language note**: The pipeline services (ingestion workers, Kafka consumers/producers, inference API, orchestration) are written in Go. External infrastructure that runs as its own process — MLflow, Feast — is language-agnostic and communicates over HTTP/gRPC. The distributed compute layer uses Go-native workers rather than Spark/Ray. See [Go-specific considerations](#go-specific-considerations) below.
 
 ---
 
@@ -11,8 +11,8 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        INGESTION LAYER                      │
-│  HTTP Push         File Drops        DB Change Streams      │
-│  (POST /ingest)    (MinIO/S3)        (CDC, Debezium)        │
+│  HTTP Push         File Drops        Kafka Consumer         │
+│  (POST /ingest)    (MinIO/S3)        (upstream topics)      │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -68,7 +68,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 - [x] Define `IngestionAdapter` interface (`Register(mux)` + `Events() <-chan RawEvent`) in `ingestion/adapter.go`
 - [x] Define `RawEvent` envelope type (`Source`, `Payload`, `Format`, `Path`, `ContentHash`, `Size`, `ReceivedAt`, `Metadata`)
-- [x] Define optional `Runner` interface for adapters that need a background goroutine (CDC will use this)
+- [x] Define optional `Runner` interface for adapters that need a background goroutine (CDC would use this if introduced)
 - [x] Build S3 adapter (`ingestion/s3.go`) — registers `POST /minio/events`, downloads object, hashes with SHA-256 via `TeeReader`, emits `RawEvent`
 - [x] Wire MinIO webhook notifications → shared `http.Server` → S3 adapter handler
 - [x] Build HTTP adapter (`ingestion/http.go`) — registers `POST /ingest/events/{source}`, writes payload to landing bucket, emits `RawEvent`
@@ -116,17 +116,19 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [x] `mustOpenDB` implementation in `main.go`
 - [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
-- [ ] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
+- [x] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
 - [x] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`
 
 ---
 
-### Phase 3 — CDC Ingestion
+### Phase 3 — CDC Ingestion ⏳ Deferred Stretch Goal
 
-> Stream database changes into Kafka using Debezium and logical replication.
+> **Why deferred**: CDC (Change Data Capture) captures row-level changes from an upstream operational database and streams them as events. This pipeline's Postgres instance holds only internal manifest metadata — pipeline bookkeeping, not business data. Capturing changes to manifest rows would be circular and serve no purpose. CDC becomes relevant only if an upstream operational database (e.g., an orders DB or users DB) is introduced whose row-level changes are themselves the data to be streamed. The `Runner` interface in `adapter.go` already accommodates a CDC adapter when that time comes; the Debezium connector config lives in `infra/debezium/` ready to be picked up.
 
-- [ ] Enable logical replication on Postgres (`wal_level = logical`)
+If an upstream operational DB is introduced, the implementation path would be:
+
+- [ ] Enable logical replication on the upstream Postgres (`wal_level = logical`)
 - [ ] Create a replication slot: `SELECT pg_create_logical_replication_slot('debezium', 'pgoutput')`
 - [ ] Configure and run Debezium Postgres connector (via Kafka Connect)
 - [ ] Verify event envelope shape: `before`, `after`, `op`, `ts_ms`, `source` fields present
@@ -280,10 +282,11 @@ Recorded in `ADR/` as decisions are made.
 | Parquet library              | `parquet-go`                                                            | ✅ decided |
 | HTTP routing                 | stdlib `net/http` + `ServeMux`                                          | ✅ decided |
 | Adapter pattern              | `Register(mux)` + shared server                                         | ✅ decided |
-| CDC adapter                  | `Runner` interface, not HTTP                                            | ✅ decided |
+| Runner interface             | Defined in adapter.go; CDC would use it if an upstream DB is introduced | ✅ decided |
 | Ingestion package layout     | Flat `ingestion/` package                                               | ✅ decided |
-| Infra config (Debezium etc.) | `infra/debezium/` not `ingestion/`                                      | ✅ decided |
+| Infra config (Debezium etc.) | `infra/debezium/` not `ingestion/` — ready if CDC is introduced         | ✅ decided |
 | Compute framework            | Go-native worker pools, not Spark/Ray                                   | ✅ decided |
+| CDC / Debezium               | Deferred — no upstream operational DB; manifest DB is internal only     | ⏳ stretch |
 | Orchestrator                 | Temporal (pending Phase 9)                                              | ⏳ pending |
 | Inference runtime            | ONNX in-process vs gRPC sidecar                                         | ⏳ pending |
 | Feature store                | Custom Redis                                                            | ✅ decided |
@@ -353,7 +356,6 @@ for i := 0; i < workerCount; i++ {
 | Concern                  | Target                                         |
 | ------------------------ | ---------------------------------------------- |
 | File processing latency  | < 5 min from landing to processed storage      |
-| CDC event latency        | < 1 second end-to-end                          |
 | Online feature retrieval | < 10ms p99                                     |
 | Inference endpoint       | < 50ms p99 at 100 req/s                        |
 | Pipeline availability    | Zero data loss on any single component failure |
@@ -378,9 +380,6 @@ go build ./...
 
 # Verify Kafka is healthy
 docker exec -it kafka kafka-topics.sh --list --bootstrap-server localhost:9092
-
-# Verify Postgres replication slot (for CDC, Phase 3)
-psql -U postgres -c "SELECT slot_name, active FROM pg_replication_slots;"
 
 # Upload a test file to MinIO landing zone
 aws s3 cp tests/fixtures/sample.csv \
@@ -410,7 +409,7 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 │   ├── adapter.go              # IngestionAdapter interface, Runner interface, RawEvent
 │   ├── s3.go                   # S3/MinIO adapter (Register + webhook handler)
 │   ├── http.go                 # HTTP push adapter (Register + POST /ingest/events/{source})
-│   ├── cdc.go                  # CDC adapter — Phase 3 (implements Runner, no HTTP routes)
+│   ├── cdc.go                  # CDC adapter stub — stretch goal (implements Runner, no HTTP routes)
 │   ├── worker.go               # Fan-in merge, sequential process() loop
 │   ├── parse.go                # Seam: translates RawEvent → parser.Input → []Record
 │   ├── validate.go             # Size bounds, magic bytes, checksum — TODO
@@ -445,7 +444,7 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── Makefile
-│   └── debezium/               # Debezium connector JSON config (Phase 3)
+│   └── debezium/               # Debezium connector config — stretch goal (Phase 3)
 ├── tests/
 │   ├── fixtures/               # sample.csv, sample.parquet, sample.ndjson
 │   └── integration/            # End-to-end pipeline tests

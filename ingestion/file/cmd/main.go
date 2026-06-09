@@ -54,6 +54,7 @@ func main() {
 
 	worker, err := file.NewWorker(file.WorkerConfig{
 		Adapters:         []file.IngestionsAdapter{s3Adapter, httpAdapter},
+		LandingBucket:    cfg.LandingBucket,
 		ProcessedBucket:  cfg.ProcessedBucket,
 		QuarantineBucket: cfg.QuarantineBucket,
 		DB:               mustOpenDB(ctx, cfg.DatabaseURL, logger),

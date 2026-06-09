@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,6 +15,7 @@ import (
 
 type WorkerConfig struct {
 	Adapters         []IngestionsAdapter
+	LandingBucket    string
 	ProcessedBucket  string
 	QuarantineBucket string
 	DB               *pgxpool.Pool
@@ -38,10 +41,14 @@ func (w *Worker) Adapters() []IngestionsAdapter {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	stuckThreshold := 31 * time.Minute
+	if err := w.recoverStuck(ctx, stuckThreshold); err != nil {
+		w.cfg.Logger.Error("failed to recover stuck entries", "error", err)
+	}
+
 	merged := make(chan RawEvent, 512)
 
 	for _, adapter := range w.Adapters() {
-		adapter := adapter
 		go func() {
 			select {
 			case <-ctx.Done():
@@ -67,6 +74,48 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+func (w *Worker) recoverStuck(ctx context.Context, olderThan time.Duration) error {
+	stuckEntries, err := w.manifest.GetStuck(ctx, olderThan)
+	if err != nil {
+		return fmt.Errorf("failed to query stuck manifest entries: %w", err)
+	}
+
+	if len(stuckEntries) == 0 {
+		return nil
+	}
+
+	w.cfg.Logger.Info("re-queueing stuck entries", "count", len(stuckEntries))
+
+	for _, entry := range stuckEntries {
+		event := RawEvent{
+			Path:        entry.Path,
+			ContentHash: entry.ContentHash,
+			Source:      entry.Source,
+			Payload:     nil,
+		}
+
+		payload, err := w.fetchPayload(ctx, event)
+		if err != nil {
+			w.cfg.Logger.Error("failed to fetch payload for stuck entry, marking as failed", "content_hash", entry.ContentHash, "error", err)
+			_ = w.manifest.UpdateStatus(ctx, entry.ContentHash, StatusFailed)
+			continue
+		}
+		event.Payload = payload
+
+		w.cfg.Logger.Info("re-queueing stuck entry", "path", event.Path, "source", event.Source, "content_hash", event.ContentHash)
+
+		if err := w.manifest.UpdateStatus(ctx, entry.ContentHash, StatusPending); err != nil {
+			w.cfg.Logger.Error("failed to mark stuck entry as failed", "content_hash", entry.ContentHash, "error", err)
+			continue
+		}
+
+		if err := w.process(ctx, event); err != nil {
+			w.cfg.Logger.Error("failed to re-process stuck entry", "path", event.Path, "source", event.Source, "content_hash", event.ContentHash, "error", err)
+		}
+	}
+	return nil
+}
+
 // Process runs RawEvent through the ingestion sequence
 func (w *Worker) process(ctx context.Context, event RawEvent) error {
 	log := w.cfg.Logger.With("path", event.Path, "source", event.Source, "hash", event.ContentHash)
@@ -83,6 +132,7 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 			return nil
 		case StatusProcessing:
 			log.Info("file is currently being processed by another worker, skipping")
+			return nil
 		case StatusFailed, StatusQuarantined:
 			log.Warn("file was previously processed but failed or quarantined, skipping", "previous_status", existing.Status)
 			return nil
@@ -94,6 +144,7 @@ func (w *Worker) process(ctx context.Context, event RawEvent) error {
 		Path:        event.Path,
 		ContentHash: event.ContentHash,
 		Source:      event.Source,
+		Status:      StatusPending,
 	}); err != nil {
 		return fmt.Errorf("failed to insert manifest entry: %w", err)
 	}
@@ -157,4 +208,22 @@ func (w *Worker) quarantine(ctx context.Context, event RawEvent) error {
 		Body:   bytes.NewReader(event.Payload),
 	})
 	return err
+}
+
+func (w *Worker) fetchPayload(ctx context.Context, event RawEvent) ([]byte, error) {
+	output, err := w.cfg.S3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &w.cfg.LandingBucket,
+		Key:    &event.Path,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	defer output.Body.Close()
+
+	payload, err := io.ReadAll(output.Body)
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
