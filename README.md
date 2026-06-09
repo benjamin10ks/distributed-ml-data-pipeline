@@ -9,35 +9,61 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        INGESTION LAYER                      │
-│  HTTP Push         File Drops        Kafka Consumer         │
-│  (POST /ingest)    (MinIO/S3)        (upstream topics)      │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                    STREAMING LAYER                          │
-│                    Kafka (franz-go)                         │
-│          Partitioned, durable, replayable event bus         │
-└──────────┬──────────────┬──────────────┬────────────────────┘
-           │              │              │
-┌──────────▼──┐   ┌───────▼──────┐  ┌───▼─────────────────────┐
-│  Validate   │   │   Feature    │  │  Distributed Compute    │
-│  + Filter   │   │  Engineering │  │  (Go worker pools)      │
-└──────────┬──┘   └───────┬──────┘  └───┬─────────────────────┘
-           └──────────────┼─────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                      STORAGE LAYER                          │
-│   Feature Store        Data Lakehouse      Model Registry   │
-│   (Redis + Feast)    (Parquet, Delta)      (MLflow)         │
-└──────────┬──────────────┬──────────────┬────────────────────┘
-           │              │              │
-┌──────────▼──┐   ┌───────▼──────┐  ┌───▼─────────────────────┐
-│  Real-time  │   │    Batch     │  │      Monitoring         │
-│  Inference  │   │  Prediction  │  │   (Drift, Prometheus)   │
-│  (ONNX)     │   │              │  │                         │
-└─────────────┘   └──────────────┘  └─────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          INGESTION LAYER                            │
+│                                                                     │
+│   HTTP Push Adapter        S3/MinIO Adapter       (CDC — stretch)  │
+│   POST /ingest/events      POST /minio/events      Runner iface     │
+│          │                        │                                 │
+│          └────────────┬───────────┘                                 │
+│                       ▼                                             │
+│               worker.process()  ← in-process, sequential today     │
+│               ┌───────────────────────────────────────┐            │
+│               │  1. idempotency check (manifest DB)   │            │
+│               │  2. manifest insert → "processing"    │            │
+│               │  3. validate: magic bytes, size,      │            │
+│               │              checksum sidecar         │            │
+│               │  4. parse: CSV / NDJSON / Parquet     │            │
+│               │            → []Record                 │            │
+│               │  5. store: Snappy Parquet →           │            │
+│               │            processed bucket           │            │
+│               │  6. manifest → "done"                 │            │
+│               │  7. publish → files.processed (Kafka) │            │
+│               └───────────────────────────────────────┘            │
+│                       │                                             │
+│               Bad files → quarantine bucket + manifest "quarantined"│
+└───────────────────────┬─────────────────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────────────────┐
+│                       STREAMING LAYER                               │
+│                       Kafka (franz-go)                              │
+│             Partitioned, durable, replayable event bus              │
+│                                                                     │
+│   Topic: files.processed  (path + metadata, not file contents)      │
+└───────┬───────────────────────┬────────────────────────┬────────────┘
+        │                       │                        │
+        │  Phase 5              │  Phase 7               │  Phase 10
+┌───────▼──────────┐   ┌────────▼────────┐   ┌──────────▼──────────┐
+│ Feature          │   │ Lakehouse       │   │ Drift / Monitoring  │
+│ Engineering      │   │ Writer          │   │ (Prometheus)        │
+│                  │   │                 │   │                     │
+│ type coercion    │   │ append Parquet  │   │ track feature       │
+│ normalization    │   │ to Delta/Iceberg│   │ distributions,      │
+│ encoding         │   │ on MinIO        │   │ alert on KL         │
+│ null/range checks│   │                 │   │ divergence          │
+└───────┬──────────┘   └─────────────────┘   └─────────────────────┘
+        │
+┌───────▼──────────────────────────────────────────────────────────────┐
+│                         STORAGE LAYER                                │
+│   Feature Store (Redis + Feast)    Data Lakehouse    Model Registry  │
+│                                   (Parquet, Delta)   (MLflow)        │
+└───────┬──────────────────────────────────────────────────────────────┘
+        │
+┌───────▼──────────────────────────────────────────────────────────────┐
+│                         SERVING LAYER                                │
+│   Real-time Inference (ONNX)          Batch Prediction               │
+│   POST /predict → Redis → model       reads lakehouse → worker pool  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
