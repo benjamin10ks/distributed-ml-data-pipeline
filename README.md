@@ -134,10 +134,8 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] `parse.go` in `ingestion/` — seam between `RawEvent` and parser package; only file that knows both types
 - [x] Format detection (`detectFormat`) — magic bytes take precedence over file extension
 
-**Still to do**
-
 - [x] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
-- [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size
+- [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB max file size
 - [x] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `files.processed` topic
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [x] `mustOpenDB` implementation in `main.go`
@@ -264,11 +262,11 @@ If an upstream operational DB is introduced, the implementation path would be:
 - [ ] Containerize the service: write `Dockerfile` using a distroless or scratch base image — Go binaries produce small, fast images
 - [ ] Implement a batch prediction job: reads Parquet from lakehouse, fans out predictions across worker pool, writes results back
 - [ ] Load test the inference endpoint using `hey` or `k6` (target: 100 req/s at < 50ms p99 latency on a single container)
-- [ ] Add a canary deployment pattern: route 5% of traffic to a new model version via a weighted round-robin in the handler
+- [ ] Stretch - Add a canary deployment pattern: route 5% of traffic to a new model version via a weighted round-robin in the handler
 
 ---
 
-### Phase 9 — Orchestration
+### Phase 9 — Orchestration - This might not be implemented by the end of the summer, but the design will be in place
 
 > Wire the pipeline together with a scheduler that handles retries, dependencies, and backfills.
 
@@ -438,9 +436,9 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 │   ├── cdc.go                  # CDC adapter stub — stretch goal (implements Runner, no HTTP routes)
 │   ├── worker.go               # Fan-in merge, sequential process() loop
 │   ├── parse.go                # Seam: translates RawEvent → parser.Input → []Record
-│   ├── validate.go             # Size bounds, magic bytes, checksum — TODO
-│   ├── store.go                # Write Parquet to processed bucket — TODO
-│   ├── kafka.go                # Publish processed event to Kafka — TODO
+│   ├── validate.go             # Size bounds, magic bytes, checksum
+│   ├── store.go                # Write Parquet to processed bucket
+│   ├── kafka.go                # Publish processed event to Kafka
 │   ├── manifest.go             # ManifestEntry, Manifest struct, DB operations
 │   ├── config.go               # ConfigFromEnv, requireEnv, getEnv
 │   ├── migrations/
