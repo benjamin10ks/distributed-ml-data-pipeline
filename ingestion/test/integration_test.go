@@ -72,7 +72,13 @@ func TestUploadFileEndToEnd(t *testing.T) {
 		workerErr <- worker.Run(workerCtx)
 	}()
 
-	payload := []byte("name,score\nalice,42\n")
+	// The score is randomized per run so the content hash is unique every
+	// time. A fixed payload would hash identically across runs, and the
+	// worker's idempotency check is keyed only on content hash — a leftover
+	// manifest row from a previous run (e.g. one that failed before reaching
+	// the t.Cleanup below) would make this run's upload silently skip
+	// processing instead of actually exercising the pipeline.
+	payload := []byte(fmt.Sprintf("name,score\nalice,%d\n", time.Now().UnixNano()))
 	source := "integration"
 	filename := "sample.csv"
 	day := time.Now().UTC().Format("2006-01-02")
@@ -80,6 +86,19 @@ func TestUploadFileEndToEnd(t *testing.T) {
 	expectedHash := sha256.Sum256(payload)
 	expectedHashHex := hex.EncodeToString(expectedHash[:])
 	expectedProcessedKey := fmt.Sprintf("source=%s/date=%s/%s", source, day, strings.TrimSuffix(filename, filepath.Ext(filename))+".parquet")
+
+	// Registered immediately, before anything below can fail, so cleanup
+	// always runs — t.Fatalf unwinds the test function right away, so any
+	// t.Cleanup call placed after a possible failure point would never
+	// execute on that failure (this is what let the stale row above happen).
+	t.Cleanup(func() {
+		db.Exec(context.Background(),
+			"DELETE FROM file_manifest WHERE content_hash = $1", expectedHashHex)
+		s3Client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			Bucket: &cfg.processedBucket,
+			Key:    &expectedProcessedKey,
+		})
+	})
 
 	if _, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: &cfg.landingBucket,
@@ -143,15 +162,6 @@ func TestUploadFileEndToEnd(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not stop")
 	}
-
-	t.Cleanup(func() {
-		db.Exec(context.Background(),
-			"DELETE FROM file_manifest WHERE content_hash = $1", expectedHashHex)
-		s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: &cfg.processedBucket,
-			Key:    &expectedProcessedKey,
-		})
-	})
 }
 
 type integrationConfig struct {
