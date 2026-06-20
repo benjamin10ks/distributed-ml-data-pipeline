@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/benjamin10ks/distributed-ml-data-pipeline/internal/config"
 	"github.com/benjamin10ks/distributed-ml-data-pipeline/internal/logging"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func main() {
@@ -52,12 +54,16 @@ func main() {
 		Handler: mux,
 	}
 
+	kafkaClient := mustOpenKafka(cfg.KafkaBootstrapServers, logger)
+	defer kafkaClient.Close()
+
 	worker, err := file.NewWorker(file.WorkerConfig{
 		Adapters:         []file.IngestionsAdapter{s3Adapter, httpAdapter},
 		LandingBucket:    cfg.LandingBucket,
 		ProcessedBucket:  cfg.ProcessedBucket,
 		QuarantineBucket: cfg.QuarantineBucket,
 		DB:               mustOpenDB(ctx, cfg.DatabaseURL, logger),
+		KafkaClient:      kafkaClient,
 		Logger:           logger,
 	})
 	if err != nil {
@@ -127,6 +133,50 @@ func mustOpenDB(ctx context.Context, databaseURL string, logger *slog.Logger) *p
 	}
 
 	logger.Error("database connection failed after all retries", "err", err)
+	os.Exit(1)
+	return nil
+}
+
+// mustOpenKafka creates a franz-go client and confirms the seed brokers are
+// reachable. franz-go enables idempotent produces and waits for all in-sync
+// replicas to ack by default, so no extra ProducerOpt is needed for that.
+func mustOpenKafka(bootstrapServers string, logger *slog.Logger) *kgo.Client {
+	const (
+		maxAttempts = 5
+		baseDelay   = 1 * time.Second
+	)
+
+	seeds := strings.Split(bootstrapServers, ",")
+
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(seeds...),
+		kgo.ClientID("ingestion-file"),
+	)
+	if err != nil {
+		logger.Error("failed to construct kafka client", "error", err)
+		os.Exit(1)
+	}
+
+	for attempt := range maxAttempts {
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = client.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			logger.Info("kafka connected", "attempt", attempt+1, "seeds", seeds)
+			return client
+		}
+
+		delay := baseDelay * time.Duration(1<<attempt) // 1s, 2s, 4s, 8s, 16s
+		logger.Warn(
+			"kafka not ready, retrying",
+			"attempt", attempt+1,
+			"delay", delay,
+			"err", err,
+		)
+		time.Sleep(delay)
+	}
+
+	logger.Error("kafka connection failed after all retries", "err", err)
 	os.Exit(1)
 	return nil
 }

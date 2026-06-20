@@ -23,6 +23,9 @@ type Config struct {
 
 	// Postgres (manifest)
 	DatabaseURL string // e.g. "postgres://postgres:password@localhost:5432/pipeline"
+
+	// Kafka
+	KafkaBootstrapServers string // comma-separated list, e.g. "localhost:9092"
 }
 
 // ConfigFromEnv reads configuration from environment variables.
@@ -39,6 +42,8 @@ func ConfigFromEnv() Config {
 		ProcessedBucket:  getEnv("PROCESSED_BUCKET", "processed"),
 		QuarantineBucket: getEnv("QUARANTINE_BUCKET", "quarantine"),
 		DatabaseURL:      requireEnv("DATABASE_URL"),
+
+		KafkaBootstrapServers: getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
 	}
 }
 
