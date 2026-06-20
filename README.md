@@ -174,6 +174,7 @@ If an upstream operational DB is introduced, the implementation path would be:
 - [x] Kafka client chosen: `github.com/twmb/franz-go` (pure Go, no CGO)
 - [ ] Define topic partitioning strategy per source (CDC: by PK, files: by source name)
 - [ ] Set retention policies per topic (raw events: 7 days, processed: 30 days)
+- [ ] Enforce schema definition via Protobuf serialization (`proto/events/`)
 - [ ] Implement a generic Kafka producer with retry logic and idempotent writes enabled
 - [ ] Implement a generic Kafka consumer with manual offset commits (no auto-commit)
 - [ ] Use goroutines for concurrent partition consumption — one goroutine per partition is idiomatic
@@ -314,7 +315,7 @@ Recorded in `ADR/` as decisions are made.
 | Orchestrator                 | Temporal (pending Phase 9)                                              | ⏳ pending |
 | Inference runtime            | ONNX in-process vs gRPC sidecar                                         | ⏳ pending |
 | Feature store                | Custom Redis                                                            | ✅ decided |
-| Message format               | Avro vs Protobuf vs JSON                                                | ⏳ pending |
+| Message format               | Protobuf                                                                | ⏳ pending |
 | Exactly-once semantics       | At-least-once + idempotent manifest                                     | ✅ decided |
 | Training-serving skew        | Feature pipeline serialized to JSON, same code path for train and serve | ⏳ pending |
 

@@ -2,10 +2,12 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,6 +62,9 @@ func (m *Manifest) GetByHash(ctx context.Context, contentHash string) (*Manifest
 	m.logger.Info("querying manifest entry by hash", "content_hash", contentHash)
 	var e ManifestEntry
 	err := row.Scan(&e.Path, &e.ContentHash, &e.Source, &e.Status, &e.CreatedAt, &e.ProcessedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

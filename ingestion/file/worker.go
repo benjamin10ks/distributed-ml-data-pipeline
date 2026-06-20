@@ -50,14 +50,16 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	for _, adapter := range w.Adapters() {
 		go func() {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-adapter.Events():
-				if !ok {
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case event, ok := <-adapter.Events():
+					if !ok {
+						return
+					}
+					merged <- event
 				}
-				merged <- event
 			}
 		}()
 	}
