@@ -92,12 +92,12 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 **Ingestion adapter layer**
 
-- [x] Define `IngestionAdapter` interface (`Register(mux)` + `Events() <-chan RawEvent`) in `ingestion/adapter.go`
+- [x] Define `IngestionsAdapter` interface (`Register(mux)` + `Events() <-chan RawEvent`) in `ingestion/file/adapter.go`
 - [x] Define `RawEvent` envelope type (`Source`, `Payload`, `Format`, `Path`, `ContentHash`, `Size`, `ReceivedAt`, `Metadata`)
 - [x] Define optional `Runner` interface for adapters that need a background goroutine (CDC would use this if introduced)
-- [x] Build S3 adapter (`ingestion/s3.go`) — registers `POST /minio/events`, downloads object, hashes with SHA-256 via `TeeReader`, emits `RawEvent`
+- [x] Build S3 adapter (`ingestion/file/s3.go`) — registers `POST /minio/events`, downloads object, hashes with SHA-256 via `TeeReader`, emits `RawEvent`
 - [x] Wire MinIO webhook notifications → shared `http.Server` → S3 adapter handler
-- [x] Build HTTP adapter (`ingestion/http.go`) — registers `POST /ingest/events/{source}`, writes payload to landing bucket, emits `RawEvent`
+- [x] Build HTTP adapter (`ingestion/file/http.go`) — registers `POST /ingest/events/{source}`, writes payload to landing bucket, emits `RawEvent`
 - [x] Share a single `http.Server` and `ServeMux` across all adapters — instantiated in `main.go`, adapters call `Register(mux)`
 
 **Landing zone**
@@ -110,39 +110,41 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 
 - [x] Create `file_manifest` table (`path`, `content_hash`, `source`, `status`, `created_at`, `processed_at`)
 - [x] Partial index on `status` for `pending` and `processing` rows only
-- [x] `Manifest` struct in `ingestion/manifest.go` with `Insert`, `GetByHash`, `UpdateStatus`, `GetStuck`
+- [x] `Manifest` struct in `ingestion/file/manifest.go` with `Insert`, `GetByHash`, `UpdateStatus`, `GetStuck` — `GetByHash` returns `(nil, nil)` for a not-found hash instead of surfacing `pgx.ErrNoRows`, so new files aren't mistaken for an error
 - [x] Status constants: `pending → processing → done | failed | quarantined`
 - [x] `GetStuck` queries entries in `processing` older than a threshold — used on restart to recover crashed workers
 - [x] DB connection pool (`pgx/v5`) opened in `main.go`, injected into `Manifest` and `Worker`
 
 **Worker**
 
-- [x] `Worker` in `ingestion/worker.go` merges all adapter channels into one stream via a fan-in goroutine per adapter
+- [x] `Worker` in `ingestion/file/worker.go` merges all adapter channels into one stream via a fan-in goroutine per adapter (each goroutine loops on its adapter's channel for the life of the process)
 - [x] Sequential `process()` loop for now — Phase 6 replaces with bounded `errgroup` worker pool
 - [x] `process()` sequence: idempotency check → manifest insert → `processing` → validate → parse → write processed → `done` → publish Kafka event
-- [x] Kafka publish failure does not fail the operation — file is safely stored, publish retried via manifest query
+- [x] Kafka publish failure does not fail the operation — file is safely stored, error logged
+- [ ] Stretch: retry failed Kafka publishes by tracking publish state on the manifest (not implemented — a failed publish is currently logged and dropped, not retried)
 - [x] Bad files log and continue — one quarantined file does not stop the pipeline
 
 **Parsers**
 
-- [x] `Parser` interface (`Parse(io.Reader) ([]Record, error)`) in `ingestion/parser/parser.go`
+- [x] `Parser` interface (`Parse(io.Reader) ([]Record, error)`) in `ingestion/file/parser/parser.go`
 - [x] `Record` type: `map[string]any` — preserves native types, coercion deferred to feature engineering
 - [x] `For(format string) (Parser, error)` factory — dispatches on `"csv"`, `"parquet"`, `"ndjson"`
-- [x] CSV parser (`ingestion/parser/csv.go`) — `encoding/csv` stdlib, `ReuseRecord` for reduced allocations, copies header row
-- [x] NDJSON parser (`ingestion/parser/ndjson.go`) — `json.NewDecoder` streaming loop
-- [x] Parquet parser (`ingestion/parser/parquet.go`) — `parquet-go`, reads in 128-row chunks via `GenericReader`
-- [x] `parse.go` in `ingestion/` — seam between `RawEvent` and parser package; only file that knows both types
+- [x] CSV parser (`ingestion/file/parser/csv.go`) — `encoding/csv` stdlib, `ReuseRecord` for reduced allocations, copies header row
+- [x] NDJSON parser (`ingestion/file/parser/ndjson.go`) — `json.NewDecoder` streaming loop
+- [x] Parquet parser (`ingestion/file/parser/parquet.go`) — `parquet-go`, reads in 128-row chunks via `GenericReader`
+- [x] `parse.go` in `ingestion/file/` — seam between `RawEvent` and parser package; only file that knows both types
 - [x] Format detection (`detectFormat`) — magic bytes take precedence over file extension
 
-- [x] `validate.go` — size bounds, magic byte verification, optional checksum sidecar check
-- [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB max file size
+- [x] `validator.go` — size bounds, magic byte verification, recomputes SHA-256 and compares against the adapter-computed `ContentHash` (no external checksum sidecar file today)
+- [x] `store.go` — write parsed records to processed bucket as Snappy-compressed Parquet, 128–256MB target file size, multi-part + manifest JSON for larger record sets
 - [x] `kafka.go` — publish lightweight processed event (path + metadata, not file contents) to `files.processed` topic
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [x] `mustOpenDB` implementation in `main.go`
+- [x] `mustOpenKafka` implementation in `main.go` — connects with retry/backoff and hands the client to `Worker`, so `publishProcessed` actually publishes (franz-go enables idempotent produces by default)
 - [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
 - [x] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
-- [x] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done`
+- [x] Integration test: upload a file end-to-end, assert it appears in processed bucket with correct hash and manifest status `done` (lives at `ingestion/test/integration_test.go`)
 
 ---
 
@@ -163,20 +165,21 @@ If an upstream operational DB is introduced, the implementation path would be:
 - [ ] Add replication slot lag monitoring (`pg_replication_slots` → alert if lag > threshold)
 - [ ] Run initial snapshot test: connect Debezium to a table with existing rows, verify read events
 - [ ] Write consumer that reads CDC events and prints before/after diffs (smoke test)
-- [ ] Add `cdc.go` to `ingestion/` implementing the `Runner` interface (no HTTP routes — background goroutine only)
+- [ ] Add `cdc.go` to `ingestion/file/` implementing the `Runner` interface (no HTTP routes — background goroutine only)
 
 ---
 
-### Phase 4 — Streaming Layer (Kafka)
+### Phase 4 — Streaming Layer (Kafka) 🔧 In Progress
 
 > Harden the event bus: producers, consumers, schema enforcement, and observability.
 
 - [x] Kafka client chosen: `github.com/twmb/franz-go` (pure Go, no CGO)
-- [ ] Define topic partitioning strategy per source (CDC: by PK, files: by source name)
-- [ ] Set retention policies per topic (raw events: 7 days, processed: 30 days)
-- [ ] Enforce schema definition via Protobuf serialization (`proto/events/`)
-- [ ] Implement a generic Kafka producer with retry logic and idempotent writes enabled
-- [ ] Implement a generic Kafka consumer with manual offset commits (no auto-commit)
+- [x] Topics created via `infra/kafka/create-topics.sh`: `files.raw` (6 partitions), `files.processed` (6 partitions), `cdc.events` (3 partitions), `dead-letter` (1 partition)
+- [x] Set retention policies per topic (raw events: 7 days, processed: 30 days — configured in `create-topics.sh`, overridable via env)
+- [ ] Define topic partitioning strategy per source — producer currently keys by `content_hash` (`kafka.go`), not by `source`; revisit if a downstream consumer needs per-source ordering
+- [ ] Enforce schema definition via Protobuf serialization (`proto/events/`) — `ProcessedEvent` is currently a JSON-serialized Go struct
+- [x] Kafka producer wired: `mustOpenKafka` in `main.go` connects with retry/backoff; `publishProcessed` in `kafka.go` publishes to `files.processed`; idempotent writes + all-ISR acks are franz-go defaults (left as-is, not explicitly configured)
+- [ ] Implement a Kafka consumer with manual offset commits (no auto-commit) — **no consumer exists yet**; `files.processed` only accumulates messages today, nothing reads them
 - [ ] Use goroutines for concurrent partition consumption — one goroutine per partition is idiomatic
 - [ ] Add consumer group lag monitoring (expose as Prometheus metrics via `prometheus/client_golang`)
 - [ ] Test at-least-once delivery: kill a consumer mid-batch, verify no events are lost on restart
@@ -299,25 +302,25 @@ If an upstream operational DB is introduced, the implementation path would be:
 
 Recorded in `ADR/` as decisions are made.
 
-| Decision                     | Choice                                                                  | Status     |
-| ---------------------------- | ----------------------------------------------------------------------- | ---------- |
-| Kafka client                 | `franz-go` (pure Go, no CGO)                                            | ✅ decided |
-| Postgres client              | `pgx/v5`                                                                | ✅ decided |
-| S3 client                    | `aws-sdk-go-v2`                                                         | ✅ decided |
-| Parquet library              | `parquet-go`                                                            | ✅ decided |
-| HTTP routing                 | stdlib `net/http` + `ServeMux`                                          | ✅ decided |
-| Adapter pattern              | `Register(mux)` + shared server                                         | ✅ decided |
-| Runner interface             | Defined in adapter.go; CDC would use it if an upstream DB is introduced | ✅ decided |
-| Ingestion package layout     | Flat `ingestion/` package                                               | ✅ decided |
-| Infra config (Debezium etc.) | `infra/debezium/` not `ingestion/` — ready if CDC is introduced         | ✅ decided |
-| Compute framework            | Go-native worker pools, not Spark/Ray                                   | ✅ decided |
-| CDC / Debezium               | Deferred — no upstream operational DB; manifest DB is internal only     | ⏳ stretch |
-| Orchestrator                 | Temporal (pending Phase 9)                                              | ⏳ pending |
-| Inference runtime            | ONNX in-process vs gRPC sidecar                                         | ⏳ pending |
-| Feature store                | Custom Redis                                                            | ✅ decided |
-| Message format               | Protobuf                                                                | ⏳ pending |
-| Exactly-once semantics       | At-least-once + idempotent manifest                                     | ✅ decided |
-| Training-serving skew        | Feature pipeline serialized to JSON, same code path for train and serve | ⏳ pending |
+| Decision                     | Choice                                                                     | Status     |
+| ---------------------------- | -------------------------------------------------------------------------- | ---------- |
+| Kafka client                 | `franz-go` (pure Go, no CGO)                                               | ✅ decided |
+| Postgres client              | `pgx/v5`                                                                   | ✅ decided |
+| S3 client                    | `aws-sdk-go-v2`                                                            | ✅ decided |
+| Parquet library              | `parquet-go`                                                               | ✅ decided |
+| HTTP routing                 | stdlib `net/http` + `ServeMux`                                             | ✅ decided |
+| Adapter pattern              | `Register(mux)` + shared server                                            | ✅ decided |
+| Runner interface             | Defined in adapter.go; CDC would use it if an upstream DB is introduced    | ✅ decided |
+| Ingestion package layout     | `ingestion/file/` package (room for `ingestion/cdc/` etc. per source type) | ✅ decided |
+| Infra config (Debezium etc.) | `infra/debezium/` not `ingestion/` — ready if CDC is introduced            | ✅ decided |
+| Compute framework            | Go-native worker pools, not Spark/Ray                                      | ✅ decided |
+| CDC / Debezium               | Deferred — no upstream operational DB; manifest DB is internal only        | ⏳ stretch |
+| Orchestrator                 | Temporal (pending Phase 9)                                                 | ⏳ pending |
+| Inference runtime            | ONNX in-process vs gRPC sidecar                                            | ⏳ pending |
+| Feature store                | Custom Redis                                                               | ✅ decided |
+| Message format               | Protobuf                                                                   | ⏳ pending |
+| Exactly-once semantics       | At-least-once + idempotent manifest                                        | ✅ decided |
+| Training-serving skew        | Feature pipeline serialized to JSON, same code path for train and serve    | ⏳ pending |
 
 ---
 
@@ -403,8 +406,8 @@ make init
 # Build all Go services
 go build ./...
 
-# Verify Kafka is healthy
-docker exec -it kafka kafka-topics.sh --list --bootstrap-server localhost:9092
+# Verify Kafka is healthy (container name is <compose-project>-kafka-1, e.g. infra-kafka-1)
+docker exec -it infra-kafka-1 kafka-topics --bootstrap-server localhost:9092 --list
 
 # Upload a test file to MinIO landing zone
 aws s3 cp tests/fixtures/sample.csv \
@@ -428,54 +431,62 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 
 ```
 .
-├── ingestion/                  # Flat package — all ingestion code lives here
-│   ├── cmd/
-│   │   └── main.go             # Wires config, adapters, shared mux, worker
-│   ├── adapter.go              # IngestionAdapter interface, Runner interface, RawEvent
-│   ├── s3.go                   # S3/MinIO adapter (Register + webhook handler)
-│   ├── http.go                 # HTTP push adapter (Register + POST /ingest/events/{source})
-│   ├── cdc.go                  # CDC adapter stub — stretch goal (implements Runner, no HTTP routes)
-│   ├── worker.go               # Fan-in merge, sequential process() loop
-│   ├── parse.go                # Seam: translates RawEvent → parser.Input → []Record
-│   ├── validate.go             # Size bounds, magic bytes, checksum
-│   ├── store.go                # Write Parquet to processed bucket
-│   ├── kafka.go                # Publish processed event to Kafka
-│   ├── manifest.go             # ManifestEntry, Manifest struct, DB operations
-│   ├── config.go               # ConfigFromEnv, requireEnv, getEnv
+├── ingestion/
+│   ├── file/                     # File-based ingestion package (not a flat ingestion/ package)
+│   │   ├── cmd/
+│   │   │   └── main.go           # Wires config, adapters, shared mux, DB pool, Kafka client, worker
+│   │   ├── adapter.go            # IngestionsAdapter interface, Runner interface, RawEvent
+│   │   ├── s3.go                 # S3/MinIO adapter (Register + webhook handler)
+│   │   ├── http.go                # HTTP push adapter (Register + POST /ingest/events/{source})
+│   │   ├── worker.go              # Fan-in merge, sequential process() loop, stuck-entry recovery
+│   │   ├── parse.go               # Seam: translates RawEvent → parser.Input → []Record
+│   │   ├── validator.go           # Size bounds, magic bytes, content-hash check
+│   │   ├── detector.go            # Unused Runner-shaped stub, not wired into main.go
+│   │   ├── store.go               # Write Parquet (Snappy) to processed bucket, multi-part chunking
+│   │   ├── kafka.go               # Publish processed event to Kafka
+│   │   ├── manifest.go            # ManifestEntry, Manifest struct, DB operations
+│   │   ├── runmigrations.go       # Runs SQL migrations from ingestion/migrations/ on startup
+│   │   └── parser/
+│   │       ├── parser.go          # Parser interface, Record type, For() factory
+│   │       ├── csv.go
+│   │       ├── parquet.go
+│   │       └── ndjson.go
 │   ├── migrations/
-│   │   └── 001_file_manifest.sql
-│   └── parser/
-│       ├── parser.go           # Parser interface, Record type, For() factory
-│       ├── csv.go
-│       ├── parquet.go
-│       └── ndjson.go
+│   │   └── 001_create_file_manifest.up.sql
+│   └── test/
+│       └── integration_test.go   # Real E2E test: upload → MinIO notify → manifest done → processed object exists
+├── internal/
+│   ├── config/                   # ConfigFromEnv, requireEnv, getEnv — shared typed config struct
+│   └── logging/                  # slog setup (JSON output, service name, log level)
 ├── streaming/
-│   └── kafka/                  # Generic producer/consumer base types (Phase 4)
+│   └── kafka/                    # empty — generic producer/consumer base types (Phase 4)
 ├── processing/
-│   ├── features/               # Feature interface + transforms (Phase 5)
-│   └── compute/                # Worker pool jobs (Phase 6)
+│   ├── features/                 # empty — Feature interface + transforms (Phase 5)
+│   └── compute/                  # empty — worker pool jobs (Phase 6)
 ├── storage/
-│   ├── lakehouse/              # Parquet/Delta write helpers (Phase 7)
-│   ├── feature_store/          # Redis client + Feast config (Phase 7)
-│   └── registry/               # MLflow REST client (Phase 7)
+│   ├── lakehouse/                 # empty (Phase 7)
+│   ├── feature_store/             # empty (Phase 7)
+│   └── registry/                  # empty (Phase 7)
 ├── serving/
-│   ├── inference/              # net/http + ONNX inference service (Phase 8)
-│   └── batch/                  # Batch prediction worker pool (Phase 8)
-├── orchestration/
-│   └── workflows/              # Temporal workflow + activity definitions (Phase 9)
+│   ├── inference/                 # empty (Phase 8)
+│   └── batch/                     # empty (Phase 8)
 ├── monitoring/
-│   ├── dashboards/             # Grafana JSON exports (Phase 10)
-│   └── alerts/                 # Prometheus alerting rules (Phase 10)
+│   ├── dashboards/                 # empty (Phase 10)
+│   └── alerts/                     # empty (Phase 10)
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── Makefile
-│   └── debezium/               # Debezium connector config — stretch goal (Phase 3)
+│   ├── kafka/
+│   │   └── create-topics.sh        # Creates files.raw, files.processed, cdc.events, dead-letter
+│   └── debezium/                    # empty — Debezium connector config, stretch goal (Phase 3)
 ├── tests/
-│   ├── fixtures/               # sample.csv, sample.parquet, sample.ndjson
-│   └── integration/            # End-to-end pipeline tests
-├── ADR/                        # Architecture Decision Records
+│   ├── fixtures/                    # empty placeholder — fixtures used today are inline in integration_test.go
+│   └── integration/                 # empty placeholder — real integration test lives at ingestion/test/
+├── ADR/                              # empty — no decision records written yet
 └── README.md
 ```
+
+Note: there is no `orchestration/` directory yet (Phase 9 hasn't started). `ingestion/` is not flat — it's a parent directory holding one subpackage per source type (`file/` today, `cdc/` if Phase 3 is ever picked up).
 
 ---
 
