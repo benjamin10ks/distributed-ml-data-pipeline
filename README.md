@@ -96,7 +96,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] Define `RawEvent` envelope type (`Source`, `Payload`, `Format`, `Path`, `ContentHash`, `Size`, `ReceivedAt`, `Metadata`)
 - [x] Define optional `Runner` interface for adapters that need a background goroutine (CDC would use this if introduced)
 - [x] Build S3 adapter (`ingestion/file/s3.go`) — registers `POST /minio/events`, downloads object, hashes with SHA-256 via `TeeReader`, emits `RawEvent`
-- [x] Wire MinIO webhook notifications → shared `http.Server` → S3 adapter handler
+- [x] Wire MinIO webhook notifications → shared `http.Server` → S3 adapter handler — `handleNotificaion` in `s3.go` now calls `url.QueryUnescape` on the notification key before using it (MinIO, like AWS S3, sends keys URL-encoded, e.g. `source%3Dsmoketest%2Fdate%3D...`); fixed and verified live via a real MinIO upload → webhook → ingestion round trip
 - [x] Build HTTP adapter (`ingestion/file/http.go`) — registers `POST /ingest/events/{source}`, writes payload to landing bucket, emits `RawEvent`
 - [x] Share a single `http.Server` and `ServeMux` across all adapters — instantiated in `main.go`, adapters call `Register(mux)`
 
@@ -141,6 +141,7 @@ A distributed, production-grade ML data pipeline covering ingestion, streaming, 
 - [x] `publishProcessed` and `writeProcessed` implementations called by worker
 - [x] `mustOpenDB` implementation in `main.go`
 - [x] `mustOpenKafka` implementation in `main.go` — connects with retry/backoff and hands the client to `Worker`, so `publishProcessed` actually publishes (franz-go enables idempotent produces by default)
+- [x] `WorkerConfig.S3Client` wired in `main.go` — added `S3Adapter.Client()` accessor so `main.go` reuses the adapter's already-configured `s3.Client` instead of constructing a second one; fixed and verified live end-to-end (upload → webhook → manifest `done` → parquet in `processed` bucket → Kafka consumer receives it)
 - [x] Quarantine: copy original file to quarantine bucket, write reason metadata, log alert
 - [x] `GetStuck` recovery: on startup query manifest for stuck `processing` entries, requeue them
 - [ ] Stretch: replace buffered channel with ElasticMQ for production-style durability
@@ -179,8 +180,9 @@ If an upstream operational DB is introduced, the implementation path would be:
 - [ ] Define topic partitioning strategy per source — producer currently keys by `content_hash` (`kafka.go`), not by `source`; revisit if a downstream consumer needs per-source ordering
 - [ ] Enforce schema definition via Protobuf serialization (`proto/events/`) — `ProcessedEvent` is currently a JSON-serialized Go struct
 - [x] Kafka producer wired: `mustOpenKafka` in `main.go` connects with retry/backoff; `publishProcessed` in `kafka.go` publishes to `files.processed`; idempotent writes + all-ISR acks are franz-go defaults (left as-is, not explicitly configured)
-- [ ] Implement a Kafka consumer with manual offset commits (no auto-commit) — **no consumer exists yet**; `files.processed` only accumulates messages today, nothing reads them
-- [ ] Use goroutines for concurrent partition consumption — one goroutine per partition is idiomatic
+- [x] Implement a generic Kafka consumer with manual offset commits (no auto-commit) — `Consumer` in `streaming/kafka/consumer.go`; `kgo.DisableAutoCommit()` + `CommitRecords` per record after its handler succeeds, `OnPartitionsRevoked` commits in-flight work before a rebalance takes the partition away
+- [x] Use goroutines for concurrent partition consumption — one goroutine per partition is idiomatic — `Consumer.Run` starts one worker goroutine per `(topic, partition)` it's assigned, fed by per-partition channels so order is preserved within a partition
+- [x] Smoke-test consumer wired to a real topic: `streaming/kafka/cmd/processed-consumer/main.go` reads `files.processed`, decodes `file.ProcessedEvent`, and logs it — verified live: produced a message via `kafka-console-producer`, confirmed the consumer logged it, and confirmed via `kafka-consumer-groups --describe` that the offset was actually committed (not just processed in-memory)
 - [ ] Add consumer group lag monitoring (expose as Prometheus metrics via `prometheus/client_golang`)
 - [ ] Test at-least-once delivery: kill a consumer mid-batch, verify no events are lost on restart
 - [ ] Test exactly-once processing: verify idempotent writes don't produce duplicates
@@ -403,16 +405,40 @@ make up
 # Initialize MinIO buckets and notifications
 make init
 
-# Build all Go services
+# Build all Go services — this is a compile check only. There are two
+# independent main packages in this repo (ingestion/file/cmd and
+# streaming/kafka/cmd/processed-consumer), so `go build ./...` discards the
+# resulting binaries instead of writing them to disk (that's documented Go
+# behavior whenever a build pattern matches more than one package, not a
+# bug). See "Run the services" below to actually get something running.
 go build ./...
 
 # Verify Kafka is healthy (container name is <compose-project>-kafka-1, e.g. infra-kafka-1)
 docker exec -it infra-kafka-1 kafka-topics --bootstrap-server localhost:9092 --list
 
-# Upload a test file to MinIO landing zone
-aws s3 cp tests/fixtures/sample.csv \
-  s3://landing/source=test/date=2026-05-17/sample.csv \
-  --endpoint-url http://localhost:9000
+# Run the services. `go run ./...` will NOT work here either — go run
+# refuses to run a pattern that matches multiple main packages. Run each
+# service in its own terminal (or background with &):
+
+# terminal 1 — the ingestion service (S3/HTTP adapters, worker, Kafka producer)
+go run ./ingestion/file/cmd
+
+# terminal 2 — smoke-test consumer that logs files.processed events
+go run ./streaming/kafka/cmd/processed-consumer
+
+# Or build real binaries once and run those instead of `go run`:
+#   go build -o bin/ingestion-file ./ingestion/file/cmd
+#   go build -o bin/processed-consumer ./streaming/kafka/cmd/processed-consumer
+#   ./bin/ingestion-file &
+#   ./bin/processed-consumer &
+
+# Upload a test file to MinIO landing zone (via the minio container's mc client —
+# no aws/mc CLI required on the host) — do this after the ingestion service
+# above is running, otherwise the file just sits in the landing bucket unread
+docker cp tests/fixtures/sample.csv infra-minio-1:/tmp/sample.csv
+docker exec infra-minio-1 mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec infra-minio-1 mc cp /tmp/sample.csv \
+  "local/landing/source=test/date=$(date -u +%Y-%m-%d)/sample.csv"
 
 # Watch the file manifest
 psql -U postgres -c \
@@ -459,7 +485,11 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 │   ├── config/                   # ConfigFromEnv, requireEnv, getEnv — shared typed config struct
 │   └── logging/                  # slog setup (JSON output, service name, log level)
 ├── streaming/
-│   └── kafka/                    # empty — generic producer/consumer base types (Phase 4)
+│   └── kafka/
+│       ├── consumer.go            # Generic Consumer: manual offset commits, one goroutine per partition
+│       └── cmd/
+│           └── processed-consumer/
+│               └── main.go        # Smoke-test consumer: logs files.processed events
 ├── processing/
 │   ├── features/                 # empty — Feature interface + transforms (Phase 5)
 │   └── compute/                  # empty — worker pool jobs (Phase 6)
@@ -480,8 +510,9 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 │   │   └── create-topics.sh        # Creates files.raw, files.processed, cdc.events, dead-letter
 │   └── debezium/                    # empty — Debezium connector config, stretch goal (Phase 3)
 ├── tests/
-│   ├── fixtures/                    # empty placeholder — fixtures used today are inline in integration_test.go
-│   └── integration/                 # empty placeholder — real integration test lives at ingestion/test/
+│   ├── fixtures/
+│   │   └── sample.csv                # Sample fixture for manual dev testing (id, name, score, category)
+│   └── integration/                 # empty placeholder — real integration test lives at ingestion/test/, which uses its own inline payload rather than this fixture
 ├── ADR/                              # empty — no decision records written yet
 └── README.md
 ```

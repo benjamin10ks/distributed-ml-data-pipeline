@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -62,6 +63,13 @@ func NewS3Adapter(landingBucket, endpoint, accessKey, secrectKey string, logger 
 	}, nil
 }
 
+// Client returns the underlying S3 client so callers (e.g. main.go's
+// WorkerConfig) can reuse the same configured client rather than
+// constructing a second one pointed at the same endpoint/credentials.
+func (s *S3Adapter) Client() *s3.Client {
+	return s.client
+}
+
 func (s *S3Adapter) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /minio/events", s.handleNotificaion)
 }
@@ -77,8 +85,14 @@ func (s *S3Adapter) handleNotificaion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, rec := range notification.Records {
-		key := rec.S3.Object.Key
 		bucket := rec.S3.Bucket.Name
+
+		// MinIO (like AWS S3) URL-encodes the key in event notifications.
+		key, err := url.QueryUnescape(rec.S3.Object.Key)
+		if err != nil {
+			s.logger.Error("failed to decode notification key", "bucket", bucket, "raw_key", rec.S3.Object.Key, "error", err)
+			continue
+		}
 
 		s.logger.Info("received notification", "bucket", bucket, "key", key)
 

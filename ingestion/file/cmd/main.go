@@ -64,6 +64,7 @@ func main() {
 		QuarantineBucket: cfg.QuarantineBucket,
 		DB:               mustOpenDB(ctx, cfg.DatabaseURL, logger),
 		KafkaClient:      kafkaClient,
+		S3Client:         s3Adapter.Client(),
 		Logger:           logger,
 	})
 	if err != nil {
